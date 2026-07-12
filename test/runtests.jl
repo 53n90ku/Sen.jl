@@ -1,7 +1,7 @@
 using Test
-using rakon
+using Sen
 
-@testset "rakon" begin
+@testset "Sen" begin
     db = create_db("test-db";dim = 128, metric = :cosine)
 
     @test db.path == "test-db"

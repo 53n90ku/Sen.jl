@@ -1,5 +1,5 @@
 using Test
-using rakon
+using Sen
 
 @testset "sqared distance" begin
     a = Float32[1,2]

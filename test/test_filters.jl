@@ -1,5 +1,5 @@
 using Test
-using rakon
+using Sen
 
 @testset "metadata filters" begin
     metadata = (

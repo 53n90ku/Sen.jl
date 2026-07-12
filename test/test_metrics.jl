@@ -1,5 +1,5 @@
 using Test
-using rakon
+using Sen
 @testset "Dot prod" begin
     a = Float32[1,2]
     b = Float32[3,4]

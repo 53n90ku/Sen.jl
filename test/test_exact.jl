@@ -1,5 +1,5 @@
 using Test
-using rakon
+using Sen
 @testset "exact search" begin
     vectors = Float32[
         1 0 -1

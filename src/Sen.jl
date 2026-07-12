@@ -1,4 +1,4 @@
-module rakon
+module Sen
 
 include("types.jl")
 include("api.jl")

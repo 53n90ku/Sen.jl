@@ -1,5 +1,5 @@
 using Test
-using rakon
+using Sen
 
 @testset "synthetic dataset" begin
     dataset = generate_synthetic_dataset(100,16;seed = 42)

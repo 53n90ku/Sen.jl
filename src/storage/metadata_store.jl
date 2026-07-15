@@ -1,5 +1,3 @@
-using Serialization
-
 mutable struct MetadataStore
     metadata::Vector{NamedTuple}
 end
@@ -43,7 +41,8 @@ end
 
 Base.length(store::MetadataStore)=length(store.metadata)
 
-const METADATA_STORE_MAGIC=UInt8[0x53,0x45,0x4e,0x4d,0x45,0x54,0x30,0x31]
+const METADATA_STORE_MAGIC_V1=UInt8[0x53,0x45,0x4e,0x4d,0x45,0x54,0x30,0x31]
+const METADATA_STORE_MAGIC_V2=UInt8[0x53,0x45,0x4e,0x4d,0x45,0x54,0x30,0x32]
 
 function save_metadata_store(path::AbstractString,store::MetadataStore)
     mkpath(path)
@@ -51,11 +50,12 @@ function save_metadata_store(path::AbstractString,store::MetadataStore)
     metadata_path=joinpath(path,"metadata.bin")
 
     open(metadata_path,"w") do io
-        write(io,METADATA_STORE_MAGIC)
-        write(io,Int64(length(store)))
+        write(io,METADATA_STORE_MAGIC_V2)
+        write_portable_uint16(io,PORTABLE_VALUE_FORMAT_VERSION)
+        write_portable_length(io,length(store),"metadata count")
 
         for metadata in store.metadata
-            serialize(io,metadata)
+            write_portable_named_tuple(io,metadata)
         end
     end
 
@@ -67,23 +67,39 @@ function load_metadata_store(path::AbstractString)
     isfile(metadata_path)||throw(ArgumentError("metadata file does not exist"))
 
     return open(metadata_path,"r") do io
-        magic=Vector{UInt8}(undef,length(METADATA_STORE_MAGIC))
-        read!(io,magic)
-        magic==METADATA_STORE_MAGIC||throw(ArgumentError("invalid metadata file"))
+        try
+            magic=read(io,length(METADATA_STORE_MAGIC_V2))
 
-        count=Int(read(io,Int64))
-        count>=0||throw(ArgumentError("stored metadata count cannot be negative"))
+            if magic==METADATA_STORE_MAGIC_V2
+                version=Int(read_portable_uint16(io))
+                version==PORTABLE_VALUE_FORMAT_VERSION||throw(ArgumentError("unsupported metadata format version"))
+                count=read_portable_length(io,"metadata count")
+                metadata=Vector{NamedTuple}(undef,count)
 
-        metadata=Vector{NamedTuple}(undef,count)
+                for index in 1:count
+                    metadata[index]=read_portable_named_tuple(io)
+                end
 
-        for index in 1:count
-            value=deserialize(io)
-            value isa NamedTuple||throw(ArgumentError("stored metadata must be a named tuple"))
-            metadata[index]=value
+                eof(io)||throw(ArgumentError("metadata file contains unexpected data"))
+                return MetadataStore(metadata)
+            elseif magic==METADATA_STORE_MAGIC_V1
+                count=Int(read(io,Int64))
+                count>=0||throw(ArgumentError("stored metadata count cannot be negative"))
+                metadata=Vector{NamedTuple}(undef,count)
+
+                for index in 1:count
+                    value=Serialization.deserialize(io)
+                    value isa NamedTuple||throw(ArgumentError("stored metadata must be a named tuple"))
+                    metadata[index]=value
+                end
+
+                eof(io)||throw(ArgumentError("metadata file contains unexpected data"))
+                return MetadataStore(metadata)
+            end
+
+            throw(ArgumentError("invalid metadata file"))
+        catch error
+            portable_read_error(error,"metadata file")
         end
-
-        eof(io)||throw(ArgumentError("metadata file contains unexpected data"))
-
-        return MetadataStore(metadata)
     end
 end

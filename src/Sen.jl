@@ -1,6 +1,7 @@
 module Sen
 
 include("concurrency/database_lock.jl")
+include("storage/value_codec.jl")
 include("storage/vector_store.jl")
 include("storage/metadata_store.jl")
 include("storage/id_store.jl")

@@ -14,6 +14,24 @@ struct RecallCalibrationEntry
     index_version::Int
 end
 
+const RECALL_CALIBRATION_MAGIC=UInt8[0x53,0x45,0x4e,0x43,0x41,0x4c,0x30,0x31]
+const RECALL_CALIBRATION_FORMAT_VERSION=1
+const RECALL_CALIBRATION_FIELDS=(
+    :method,
+    :workload,
+    :selectivity,
+    :vector_count,
+    :list_count,
+    :target_recall,
+    :nprobe,
+    :measured_recall,
+    :p50_ms,
+    :achieved,
+    :dimension,
+    :metric,
+    :index_version,
+)
+
 RecallCalibrationEntry(method::Symbol,workload::Symbol,selectivity::Float64,vector_count::Int,list_count::Int,target_recall::Float64,nprobe::Int,measured_recall::Float64,p50_ms::Float64,achieved::Bool)=RecallCalibrationEntry(method,workload,selectivity,vector_count,list_count,target_recall,nprobe,measured_recall,p50_ms,achieved,0,:cosine,1)
 
 struct RecallCalibration
@@ -110,19 +128,84 @@ function save_recall_calibration(path::AbstractString,calibration::RecallCalibra
     isempty(directory)||mkpath(directory)
 
     open(path,"w") do io
-        serialize(io,calibration)
+        write(io,RECALL_CALIBRATION_MAGIC)
+        write_portable_uint16(io,RECALL_CALIBRATION_FORMAT_VERSION)
+        write_portable_length(io,length(calibration.entries),"calibration entry count")
+
+        for entry in calibration.entries
+            validate_calibration_entry(entry)
+            write_portable_named_tuple(io,NamedTuple{RECALL_CALIBRATION_FIELDS}(Tuple(getproperty(entry,field) for field in RECALL_CALIBRATION_FIELDS)))
+        end
     end
 
     return String(path)
 end
 
+function calibration_entry_from_portable(value::NamedTuple)
+    propertynames(value)==RECALL_CALIBRATION_FIELDS||throw(ArgumentError("stored calibration fields are invalid"))
+    value.method isa Symbol||throw(ArgumentError("stored calibration method is invalid"))
+    value.workload isa Symbol||throw(ArgumentError("stored calibration workload is invalid"))
+    value.selectivity isa Float64||throw(ArgumentError("stored calibration selectivity is invalid"))
+    value.vector_count isa Int64||throw(ArgumentError("stored calibration vector count is invalid"))
+    value.list_count isa Int64||throw(ArgumentError("stored calibration list count is invalid"))
+    value.target_recall isa Float64||throw(ArgumentError("stored calibration target recall is invalid"))
+    value.nprobe isa Int64||throw(ArgumentError("stored calibration nprobe is invalid"))
+    value.measured_recall isa Float64||throw(ArgumentError("stored calibration measured recall is invalid"))
+    value.p50_ms isa Float64||throw(ArgumentError("stored calibration latency is invalid"))
+    value.achieved isa Bool||throw(ArgumentError("stored calibration achieved flag is invalid"))
+    value.dimension isa Int64||throw(ArgumentError("stored calibration dimension is invalid"))
+    value.metric isa Symbol||throw(ArgumentError("stored calibration metric is invalid"))
+    value.index_version isa Int64||throw(ArgumentError("stored calibration index version is invalid"))
+
+    return validate_calibration_entry(RecallCalibrationEntry(
+        value.method,
+        value.workload,
+        value.selectivity,
+        Int(value.vector_count),
+        Int(value.list_count),
+        value.target_recall,
+        Int(value.nprobe),
+        value.measured_recall,
+        value.p50_ms,
+        value.achieved,
+        Int(value.dimension),
+        value.metric,
+        Int(value.index_version),
+    ))
+end
+
 function load_recall_calibration(path::AbstractString)
     isfile(path)||throw(ArgumentError("calibration file does not exist"))
 
-    calibration=open(path,"r") do io
-        deserialize(io)
-    end
-    calibration isa RecallCalibration||throw(ArgumentError("invalid calibration file"))
+    return open(path,"r") do io
+        try
+            magic=read(io,length(RECALL_CALIBRATION_MAGIC))
 
-    return calibration
+            if magic==RECALL_CALIBRATION_MAGIC
+                version=Int(read_portable_uint16(io))
+                version==RECALL_CALIBRATION_FORMAT_VERSION||throw(ArgumentError("unsupported calibration format version"))
+                count=read_portable_length(io,"calibration entry count")
+                entries=Vector{RecallCalibrationEntry}(undef,count)
+
+                for index in 1:count
+                    value=read_portable_named_tuple(io)
+                    entries[index]=calibration_entry_from_portable(value)
+                end
+
+                eof(io)||throw(ArgumentError("calibration file contains unexpected data"))
+                return RecallCalibration(entries)
+            end
+
+            if is_legacy_julia_serialization_header(magic)
+                seekstart(io)
+                calibration=Serialization.deserialize(io)
+                calibration isa RecallCalibration||throw(ArgumentError("invalid calibration file"))
+                return calibration
+            end
+
+            throw(ArgumentError("invalid calibration file"))
+        catch error
+            portable_read_error(error,"calibration file")
+        end
+    end
 end

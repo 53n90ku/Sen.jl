@@ -1,4 +1,4 @@
-function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_capacity::Int=0,)
+function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_capacity::Int=0,durable::Bool=true,)
     dim>0||throw(ArgumentError("dimension must be positive"))
     metric in (:cosine,:dot)||throw(ArgumentError("metric must be :cosine or :dot"))
     initial_capacity>=0||throw(ArgumentError("initial capacity cannot be negative"))
@@ -7,7 +7,18 @@ function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_
     metadata_store=create_metadata_store(initial_capacity=initial_capacity,)
     id_store=create_id_store(initial_capacity=initial_capacity,)
 
-    return VectorDB(String(path),dim,metric,vector_store,metadata_store,id_store,nothing,nothing,nothing,UInt64(0),nothing,DatabaseLock(),Dict{Any,Any}(),ReentrantLock())
+    db=VectorDB(String(path),dim,metric,vector_store,metadata_store,id_store,nothing,nothing,nothing,UInt64(0),nothing,DatabaseLock(),Dict{Any,Any}(),ReentrantLock())
+
+    if durable
+        wal_path=database_wal_path(path)
+        current_path=database_current_path(path)
+        manifest_path=joinpath(path,"manifest.toml")
+        any(isfile,(wal_path,current_path,manifest_path))&&throw(ArgumentError("database already exists"))
+        replace_database_wal(path,db.revision,db.dim,db.metric)
+        db.wal_revision=db.revision
+    end
+
+    return db
 end
 
 function validate_database_fast(db::VectorDB)
@@ -51,10 +62,9 @@ function validate_database(db::VectorDB)
     return db
 end
 
-function next_database_revision!(db::VectorDB)
+function next_database_revision(db::VectorDB)
     db.revision==typemax(UInt64)&&error("database revision overflow")
-    db.revision+=UInt64(1)
-    return db.revision
+    return db.revision+UInt64(1)
 end
 
 function clear_plan_cache!(db::VectorDB)
@@ -99,8 +109,9 @@ function tombstone_base_id!(db::VectorDB,id)
     return position
 end
 
-function finish_database_mutation!(db::VectorDB)
-    next_database_revision!(db)
+function finish_database_mutation!(db::VectorDB,revision::UInt64)
+    revision==next_database_revision(db)||error("database mutation revision is invalid")
+    db.revision=revision
     clear_plan_cache!(db)
     validate_database_fast(db)
     return db
@@ -126,6 +137,8 @@ function Base.insert!(db::VectorDB,vector::AbstractVector{<:Real},metadata::Name
         resolved_id=id===nothing ? next_database_id(db) : id
         resolved_id===nothing&&throw(ArgumentError("id cannot be nothing"))
         has_database_id(db,resolved_id)&&throw(ArgumentError("id already exists"))
+        revision=next_database_revision(db)
+        append_database_wal_put!(db,revision,[converted],[metadata],[resolved_id])
 
         if has_usable_base(db)
             insert_delta!(db.delta_store,converted,metadata,resolved_id)
@@ -138,7 +151,7 @@ function Base.insert!(db::VectorDB,vector::AbstractVector{<:Real},metadata::Name
         end
 
         db.live_count+=1
-        finish_database_mutation!(db)
+        finish_database_mutation!(db,revision)
         return resolved_id
     end
 end
@@ -249,12 +262,16 @@ function Base.insert!(db::VectorDB,vectors::AbstractMatrix,metadata::AbstractVec
         validate_database_fast(db)
         batch=prepare_database_batch(db,vectors,metadata,ids;allow_existing=false,)
         batch.count==0&&return batch.ids
+        revision=next_database_revision(db)
+        wal_vectors=[@view batch.vectors[:,index] for index in 1:batch.count]
+        append_database_wal_put!(db,revision,wal_vectors,batch.metadata,batch.ids)
+
         for index in 1:batch.count
             insert_database_record!(db,@view(batch.vectors[:,index]),batch.metadata[index],batch.ids[index])
         end
 
         db.live_count+=batch.count
-        finish_database_mutation!(db)
+        finish_database_mutation!(db,revision)
         return batch.ids
     end
 end
@@ -266,10 +283,12 @@ function upsert!(db::VectorDB,vector::AbstractVector{<:Real},metadata::NamedTupl
         length(vector)==db.dim||throw(DimensionMismatch("vector dimension doesnt match database"))
         converted=Float32[value for value in vector]
         existing=has_database_id(db,id)
+        revision=next_database_revision(db)
+        append_database_wal_put!(db,revision,[converted],[metadata],[id])
 
         update_database_record!(db,id,converted,metadata)
         existing||(db.live_count+=1)
-        finish_database_mutation!(db)
+        finish_database_mutation!(db,revision)
         return id
     end
 end
@@ -280,13 +299,17 @@ function upsert!(db::VectorDB,vectors::AbstractMatrix,metadata::AbstractVector{<
         batch=prepare_database_batch(db,vectors,metadata,ids;allow_existing=true,)
         batch.count==0&&return batch.ids
         new_count=count(id->!has_database_id(db,id),batch.ids)
+        revision=next_database_revision(db)
+        wal_vectors=[@view batch.vectors[:,index] for index in 1:batch.count]
+        append_database_wal_put!(db,revision,wal_vectors,batch.metadata,batch.ids)
+
         for index in 1:batch.count
             id=batch.ids[index]
             update_database_record!(db,id,@view(batch.vectors[:,index]),batch.metadata[index])
         end
 
         db.live_count+=new_count
-        finish_database_mutation!(db)
+        finish_database_mutation!(db,revision)
         return batch.ids
     end
 end
@@ -306,8 +329,10 @@ function update!(db::VectorDB,id;vector::Union{Nothing,AbstractVector{<:Real}}=n
         current=get_database_record(db,id)
         resolved_vector=converted===nothing ? current.vector : converted
         resolved_metadata=metadata===nothing ? current.metadata : metadata
+        revision=next_database_revision(db)
+        append_database_wal_put!(db,revision,[resolved_vector],[resolved_metadata],[id])
         update_database_record!(db,id,resolved_vector,resolved_metadata)
-        finish_database_mutation!(db)
+        finish_database_mutation!(db,revision)
         return db
     end
 end
@@ -315,9 +340,12 @@ end
 function Base.delete!(db::VectorDB,id)
     return with_database_write(db.database_lock) do
         validate_database_fast(db)
+        has_database_id(db,id)||throw(KeyError(id))
+        revision=next_database_revision(db)
+        append_database_wal_delete!(db,revision,[id])
         delete_database_record!(db,id)
         db.live_count-=1
-        finish_database_mutation!(db)
+        finish_database_mutation!(db,revision)
         return db
     end
 end
@@ -333,12 +361,15 @@ function Base.delete!(db::VectorDB,ids::AbstractVector)
             has_database_id(db,id)||throw(KeyError(id))
         end
 
+        revision=next_database_revision(db)
+        append_database_wal_delete!(db,revision,resolved_ids)
+
         for id in resolved_ids
             delete_database_record!(db,id)
         end
 
         db.live_count-=length(resolved_ids)
-        finish_database_mutation!(db)
+        finish_database_mutation!(db,revision)
         return db
     end
 end
@@ -566,6 +597,7 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
             current_index&&save_ivf_index(snapshot.temporary_path,db.index.ivf)
             seal_database_snapshot(snapshot.temporary_path,db.revision)
             commit_database_snapshot(db.path,snapshot)
+            checkpoint_database_wal!(db)
         catch
             abort_database_snapshot(snapshot)
             rethrow()
@@ -620,11 +652,41 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
         build!(db;nlists=config.nlists,iterations=config.iterations,seed=config.seed,restarts=config.restarts,training_count=min(length(db),max(config.nlists,config.training_count)),)
     end
 
+    replay_database_wal!(db)
+    validate_database(db)
+    return db
+end
+
+function load_db_from_wal(path::AbstractString)
+    wal=read_database_wal(path;repair_tail=true,)
+    wal===nothing&&throw(ArgumentError("database WAL does not exist"))
+    wal.header.revision==UInt64(0)||throw(ArgumentError("database snapshot is missing for checkpointed WAL"))
+    db=VectorDB(
+        String(path),
+        wal.header.dim,
+        wal.header.metric,
+        create_vector_store(wal.header.dim),
+        create_metadata_store(),
+        create_id_store(),
+        nothing,
+        nothing,
+        nothing,
+        UInt64(0),
+        nothing,
+        DatabaseLock(),
+        Dict{Any,Any}(),
+        ReentrantLock(),
+    )
+    replay_database_wal!(db)
     validate_database(db)
     return db
 end
 
 function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,)
+    if isfile(database_wal_path(path))&&!isfile(database_current_path(path))&&!isfile(joinpath(path,"manifest.toml"))&&isempty(database_snapshot_generations(path))
+        return load_db_from_wal(path)
+    end
+
     snapshot_path=try
         current_database_snapshot(path)
     catch

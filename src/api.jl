@@ -513,65 +513,163 @@ function merge_database_search_results(base_results::Vector{SearchResult},delta_
     return results
 end
 
-function search(db::VectorDB,query::AbstractVector{<:Real};k::Int=10,nprobe::Union{Nothing,Int}=nothing,filter::Union{Nothing,NamedTuple}=nothing,strategy::Symbol=:auto,planner_config::PlannerConfig=PlannerConfig(),postfilter_oversample::Int=10,adaptive_postfilter::Bool=true,adaptive::Bool=true,max_nprobe::Union{Nothing,Int}=nothing,candidate_multiplier::Float64=planner_config.candidate_multiplier,postfilter_candidate_multiplier::Float64=planner_config.postfilter_candidate_multiplier,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)
+function search_database_locked(db::VectorDB,query::AbstractVector{<:Real};k::Int=10,nprobe::Union{Nothing,Int}=nothing,filter::Union{Nothing,NamedTuple}=nothing,strategy::Symbol=:auto,planner_config::PlannerConfig=PlannerConfig(),postfilter_oversample::Int=10,adaptive_postfilter::Bool=true,adaptive::Bool=true,max_nprobe::Union{Nothing,Int}=nothing,candidate_multiplier::Float64=planner_config.candidate_multiplier,postfilter_candidate_multiplier::Float64=planner_config.postfilter_candidate_multiplier,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,_plan::Union{Nothing,QueryPlan}=nothing,)
+    length(query)==db.dim||throw(DimensionMismatch("query dimension doesnt match database"))
+    k>0||throw(ArgumentError("k must be positive"))
+    strategy===:auto||strategy_from_symbol(filter,strategy)
+    base_vectors=stored_vectors(db.vector_store)
+    base_metadata=stored_metadata(db.metadata_store)
+    index=db.index
+
+    if index===nothing
+        raw_results=search_exact(base_vectors,base_metadata,query;k=k,metric=db.metric,filter=filter,)
+        return database_search_results(raw_results,db.id_store)
+    end
+
+    plan=_plan===nothing ? (strategy===:auto ? cached_plan_query(db,filter;k=k,config=planner_config,) : plan_query(db,filter;k=k,strategy=strategy,config=planner_config,)) : _plan
+    resolved_minimum_nprobe=nprobe===nothing ? max(1,plan.minimum_nprobe) : nprobe
+    resolved_nprobe=nprobe===nothing ? max(1,plan.nprobe) : nprobe
+    list_count=length(index.ivf.lists)
+    1<=resolved_nprobe<=list_count||throw(ArgumentError("nprobe must be between 1 and list count"))
+    resolved_max_nprobe=max_nprobe===nothing ? resolved_nprobe : max_nprobe
+    resolved_max_nprobe=clamp(resolved_max_nprobe,resolved_nprobe,list_count)
+
+    raw_results=if plan.strategy isa ExactStrategy||plan.strategy isa PreFilterExactStrategy
+        search_exact(base_vectors,base_metadata,query;k=k,metric=db.metric,filter=filter,filter_index=db.filter_index,vector_norms=index.ivf.vector_norms,excluded=db.base_tombstones,)
+    elseif plan.strategy isa IVFStrategy
+        search_ivf(index.ivf,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,excluded=db.base_tombstones,)
+    elseif plan.strategy isa IVFPreFilterStrategy
+        search_ivf_prefilter(index,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,filter=filter,excluded=db.base_tombstones,)
+    elseif plan.strategy isa IVFPostFilterStrategy
+        resolved_oversample=adaptive_postfilter ? resolve_postfilter_oversample(postfilter_oversample,plan.selectivity;candidate_multiplier=postfilter_candidate_multiplier,) : postfilter_oversample
+        search_ivf_postfilter(index.ivf,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,filter=filter,oversample=resolved_oversample,excluded=db.base_tombstones,)
+    elseif plan.strategy isa BoundedFilterAwareIVFStrategy
+        search_filter_aware_bound(index,base_vectors,base_metadata,query;k=k,minimum_nprobe=resolved_minimum_nprobe,max_nprobe=resolved_max_nprobe,metric=db.metric,filter=filter,excluded=db.base_tombstones,)
+    else
+        minimum_nprobe=adaptive ? resolved_minimum_nprobe : resolved_nprobe
+        search_filter_aware_ivf(index,base_vectors,base_metadata,query;k=k,nprobe=minimum_nprobe,metric=db.metric,filter=filter,adaptive=adaptive,max_nprobe=resolved_max_nprobe,candidate_multiplier=candidate_multiplier,vector_weight=vector_weight,filter_weight=filter_weight,rerank_factor=rerank_factor,excluded=db.base_tombstones,)
+    end
+
+    base_results=database_search_results(raw_results,db.id_store)
+    delta_vectors=stored_vectors(db.delta_store.vector_store)
+    delta_metadata=stored_metadata(db.delta_store.metadata_store)
+    delta_raw=search_exact(delta_vectors,delta_metadata,query;k=k,metric=db.metric,filter=filter,)
+    delta_results=database_search_results(delta_raw,db.delta_store.id_store;index_offset=length(db.vector_store),)
+    return merge_database_search_results(base_results,delta_results,k)
+end
+
+function search(db::VectorDB,query::AbstractVector{<:Real};kwargs...)
     return with_database_read(db.database_lock) do
         validate_database_fast(db)
-        length(query)==db.dim||throw(DimensionMismatch("query dimension doesnt match database"))
-        k>0||throw(ArgumentError("k must be positive"))
-        strategy===:auto||strategy_from_symbol(filter,strategy)
-        base_vectors=stored_vectors(db.vector_store)
-        base_metadata=stored_metadata(db.metadata_store)
-        index=db.index
-
-        if index===nothing
-            raw_results=search_exact(base_vectors,base_metadata,query;k=k,metric=db.metric,filter=filter,)
-            return database_search_results(raw_results,db.id_store)
-        end
-
-        plan=strategy===:auto ? cached_plan_query(db,filter;k=k,config=planner_config,) : plan_query(db,filter;k=k,strategy=strategy,config=planner_config,)
-        resolved_minimum_nprobe=nprobe===nothing ? max(1,plan.minimum_nprobe) : nprobe
-        resolved_nprobe=nprobe===nothing ? max(1,plan.nprobe) : nprobe
-        list_count=length(index.ivf.lists)
-        1<=resolved_nprobe<=list_count||throw(ArgumentError("nprobe must be between 1 and list count"))
-        resolved_max_nprobe=max_nprobe===nothing ? resolved_nprobe : max_nprobe
-        resolved_max_nprobe=clamp(resolved_max_nprobe,resolved_nprobe,list_count)
-
-        raw_results=if plan.strategy isa ExactStrategy||plan.strategy isa PreFilterExactStrategy
-            search_exact(base_vectors,base_metadata,query;k=k,metric=db.metric,filter=filter,filter_index=db.filter_index,vector_norms=index.ivf.vector_norms,excluded=db.base_tombstones,)
-        elseif plan.strategy isa IVFStrategy
-            search_ivf(index.ivf,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,excluded=db.base_tombstones,)
-        elseif plan.strategy isa IVFPreFilterStrategy
-            search_ivf_prefilter(index,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,filter=filter,excluded=db.base_tombstones,)
-        elseif plan.strategy isa IVFPostFilterStrategy
-            resolved_oversample=adaptive_postfilter ? resolve_postfilter_oversample(postfilter_oversample,plan.selectivity;candidate_multiplier=postfilter_candidate_multiplier,) : postfilter_oversample
-            search_ivf_postfilter(index.ivf,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,filter=filter,oversample=resolved_oversample,excluded=db.base_tombstones,)
-        elseif plan.strategy isa BoundedFilterAwareIVFStrategy
-            search_filter_aware_bound(index,base_vectors,base_metadata,query;k=k,minimum_nprobe=resolved_minimum_nprobe,max_nprobe=resolved_max_nprobe,metric=db.metric,filter=filter,excluded=db.base_tombstones,)
-        else
-            minimum_nprobe=adaptive ? resolved_minimum_nprobe : resolved_nprobe
-            search_filter_aware_ivf(index,base_vectors,base_metadata,query;k=k,nprobe=minimum_nprobe,metric=db.metric,filter=filter,adaptive=adaptive,max_nprobe=resolved_max_nprobe,candidate_multiplier=candidate_multiplier,vector_weight=vector_weight,filter_weight=filter_weight,rerank_factor=rerank_factor,excluded=db.base_tombstones,)
-        end
-
-        base_results=database_search_results(raw_results,db.id_store)
-        delta_vectors=stored_vectors(db.delta_store.vector_store)
-        delta_metadata=stored_metadata(db.delta_store.metadata_store)
-        delta_raw=search_exact(delta_vectors,delta_metadata,query;k=k,metric=db.metric,filter=filter,)
-        delta_results=database_search_results(delta_raw,db.delta_store.id_store;index_offset=length(db.vector_store),)
-        return merge_database_search_results(base_results,delta_results,k)
+        search_database_locked(db,query;kwargs...)
     end
 end
 
-function search(db::VectorDB,queries::AbstractMatrix{<:Real};kwargs...)
+const DATABASE_BATCH_WORKER_KEY=:sen_database_batch_worker
+const DEFAULT_BATCH_PARALLEL_THRESHOLD=4
+
+function database_batch_worker_owned()
+    return get(task_local_storage(),DATABASE_BATCH_WORKER_KEY,false)===true
+end
+
+function with_database_batch_worker(f::Function)
+    storage=task_local_storage()
+    had_owner=haskey(storage,DATABASE_BATCH_WORKER_KEY)
+    previous_owner=get(storage,DATABASE_BATCH_WORKER_KEY,false)
+    storage[DATABASE_BATCH_WORKER_KEY]=true
+
+    try
+        return f()
+    finally
+        if had_owner
+            storage[DATABASE_BATCH_WORKER_KEY]=previous_owner
+        else
+            delete!(storage,DATABASE_BATCH_WORKER_KEY)
+        end
+    end
+end
+
+function resolve_database_batch_workers(query_count::Int;parallel::Bool,workers::Int,parallel_threshold::Int,)
+    workers>0||throw(ArgumentError("batch workers must be positive"))
+    parallel_threshold>0||throw(ArgumentError("batch parallel threshold must be positive"))
+
+    if !parallel||query_count<parallel_threshold||database_batch_worker_owned()
+        return 1
+    end
+
+    return max(1,min(query_count,workers,Threads.nthreads(:default)))
+end
+
+function resolve_database_batch_plan(db::VectorDB,kwargs)
+    db.index===nothing&&return nothing
+    filter=get(kwargs,:filter,nothing)
+    k=get(kwargs,:k,10)
+    strategy=get(kwargs,:strategy,:auto)
+    planner_config=get(kwargs,:planner_config,PlannerConfig())
+    return strategy===:auto ? cached_plan_query(db,filter;k=k,config=planner_config,) : plan_query(db,filter;k=k,strategy=strategy,config=planner_config,)
+end
+
+function search_database_batch_parallel!(results::Vector{Vector{SearchResult}},db::VectorDB,queries::AbstractMatrix{<:Real},worker_count::Int;kwargs...)
+    query_count=size(queries,2)
+    jobs=Channel{Int}(query_count)
+
+    for index in 1:query_count
+        put!(jobs,index)
+    end
+
+    close(jobs)
+    failures=Vector{Union{Nothing,Tuple{Int,Exception}}}(nothing,worker_count)
+    tasks=Vector{Task}(undef,worker_count)
+
+    for worker_index in 1:worker_count
+        tasks[worker_index]=Threads.@spawn with_database_batch_worker() do
+            query_index=0
+
+            try
+                for index in jobs
+                    query_index=index
+                    results[index]=search_database_locked(db,@view(queries[:,index]);kwargs...)
+                end
+            catch error
+                failures[worker_index]=(query_index,error)
+            end
+        end
+    end
+
+    wait.(tasks)
+    failure=nothing
+
+    for current in failures
+        current===nothing&&continue
+
+        if failure===nothing||current[1]<failure[1]
+            failure=current
+        end
+    end
+
+    failure===nothing||throw(failure[2])
+    return results
+end
+
+function search(db::VectorDB,queries::AbstractMatrix{<:Real};parallel::Bool=true,workers::Int=Threads.nthreads(:default),parallel_threshold::Int=DEFAULT_BATCH_PARALLEL_THRESHOLD,kwargs...)
     return with_database_read(db.database_lock) do
+        validate_database_fast(db)
         size(queries,1)==db.dim||throw(DimensionMismatch("query dimensions dont match database"))
         query_count=size(queries,2)
         results=Vector{Vector{SearchResult}}(undef,query_count)
+        worker_count=resolve_database_batch_workers(query_count;parallel=parallel,workers=workers,parallel_threshold=parallel_threshold,)
+        query_count==0&&return results
+        batch_plan=resolve_database_batch_plan(db,kwargs)
 
-        for index in 1:query_count
-            results[index]=search(db,@view queries[:,index];kwargs...)
+        if worker_count==1
+            for index in 1:query_count
+                results[index]=search_database_locked(db,@view(queries[:,index]);_plan=batch_plan,kwargs...)
+            end
+
+            return results
         end
 
-        return results
+        return search_database_batch_parallel!(results,db,queries,worker_count;_plan=batch_plan,kwargs...)
     end
 end
 

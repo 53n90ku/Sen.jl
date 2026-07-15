@@ -34,6 +34,7 @@ include("block_groundtruth.jl")
 include("index_diagnostics.jl")
 include("ivf_sweep.jl")
 include("metrics.jl")
+include("batch_search.jl")
 include("runner.jl")
 include("selectivity_sweep.jl")
 include("sweeps.jl")
@@ -68,6 +69,7 @@ export run_ivf_quality_configuration,run_ivf_quality_sweep
 export evaluate_hybrid_validation,save_hybrid_validation
 export bootstrap_recall_interval
 export recall_at_k,latency_summary,measure_latency
+export batch_queries_per_second,run_batch_search_benchmark
 export count_exact_candidates,count_ivf_candidates,count_ivf_prefilter_work
 export count_filter_aware_candidates,count_filter_aware_work
 export BenchmarkContext,build_benchmark_context,benchmark_summary,run_benchmark

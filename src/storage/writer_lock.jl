@@ -104,6 +104,8 @@ function activate_database_writer_lock!(db::VectorDB)
 end
 
 function Base.close(db::VectorDB)
+    stop_database_maintenance!(db)
+
     return with_database_write(db.database_lock) do
         db.closed&&return nothing
         io=db.writer_lock

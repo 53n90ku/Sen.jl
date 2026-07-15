@@ -1,4 +1,4 @@
-function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_capacity::Int=0,durable::Bool=true,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
+function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_capacity::Int=0,durable::Bool=true,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
     dim>0||throw(ArgumentError("dimension must be positive"))
     metric in (:cosine,:dot)||throw(ArgumentError("metric must be :cosine or :dot"))
     initial_capacity>=0||throw(ArgumentError("initial capacity cannot be negative"))
@@ -7,7 +7,7 @@ function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_
     metadata_store=create_metadata_store(initial_capacity=initial_capacity,)
     id_store=create_id_store(initial_capacity=initial_capacity,)
 
-    db=VectorDB(String(path),dim,metric,vector_store,metadata_store,id_store,nothing,nothing,nothing,UInt64(0),nothing,DatabaseLock(),Dict{Any,Any}(),ReentrantLock();checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
+    db=VectorDB(String(path),dim,metric,vector_store,metadata_store,id_store,nothing,nothing,nothing,UInt64(0),nothing,DatabaseLock(),Dict{Any,Any}(),ReentrantLock();checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
 
     if durable
         io=acquire_database_writer_lock(path)
@@ -42,11 +42,13 @@ function validate_database_fast(db::VectorDB)
     if db.index===nothing
         db.filter_index===nothing||error("database filter index exists without vector index")
         db.index_revision===nothing||error("database index revision exists without vector index")
+        db.index_bytes==0||error("database index size exists without vector index")
         isempty(db.delta_store.id_store.ids)||error("unindexed database has delta records")
         db.live_count==count||error("unindexed database live count is misaligned")
     else
         db.filter_index===nothing&&error("database vector index exists without filter index")
         db.index_revision===nothing&&error("database vector index has no revision")
+        db.index_bytes>0||error("database vector index size is invalid")
         db.index_revision<=db.revision||error("database index revision is ahead of database")
         sum(length,db.index.ivf.lists)==count||error("database index count is misaligned")
         db.filter_index.count==count||error("database filter index count is misaligned")
@@ -125,6 +127,7 @@ function finish_database_mutation!(db::VectorDB,revision::UInt64)
     clear_plan_cache!(db)
     validate_database_fast(db)
     maybe_checkpoint_database!(db)
+    maybe_schedule_database_maintenance!(db)
     return db
 end
 
@@ -450,7 +453,8 @@ function build!(db::VectorDB;nlists::Int,iterations::Int=20,seed::Int=42,restart
     metadata=stored_metadata(snapshot.stores.metadata_store)
     index=build_filter_aware_ivf(vectors,metadata;nlists=snapshot.config.nlists,iterations=snapshot.config.iterations,seed=snapshot.config.seed,metric=snapshot.metric,restarts=snapshot.config.restarts,training_count=snapshot.config.training_count,)
     filter_index=build_bitset_index(metadata)
-    built=(revision=snapshot.revision,config=snapshot.config,stores=snapshot.stores,index=index,filter_index=filter_index,)
+    index_bytes=database_index_bytes(index,filter_index)
+    built=(revision=snapshot.revision,config=snapshot.config,stores=snapshot.stores,index=index,filter_index=filter_index,index_bytes=index_bytes,)
 
     return install_database_index!(db,built)
 end
@@ -465,6 +469,7 @@ function install_database_index!(db::VectorDB,built)
         db.filter_index=built.filter_index
         db.build_config=built.config
         db.index_revision=built.revision
+        db.index_bytes=built.index_bytes
         db.delta_store=create_delta_store(db.dim)
         db.base_tombstones=falses(length(db.vector_store))
         db.live_count=length(db.vector_store)
@@ -507,9 +512,31 @@ end
 function merge_database_search_results(base_results::Vector{SearchResult},delta_results::Vector{SearchResult},k::Int)
     isempty(delta_results)&&return base_results
     isempty(base_results)&&return delta_results
-    results=vcat(base_results,delta_results)
-    sort!(results;by=result->result.score,rev=true,)
-    resize!(results,min(k,length(results)))
+    count=min(k,length(base_results)+length(delta_results))
+    results=Vector{SearchResult}(undef,count)
+    base_position=1
+    delta_position=1
+
+    for position in 1:count
+        take_base=if base_position>length(base_results)
+            false
+        elseif delta_position>length(delta_results)
+            true
+        else
+            base_score=base_results[base_position].score
+            delta_score=delta_results[delta_position].score
+            isless(delta_score,base_score)||isequal(base_score,delta_score)
+        end
+
+        if take_base
+            results[position]=base_results[base_position]
+            base_position+=1
+        else
+            results[position]=delta_results[delta_position]
+            delta_position+=1
+        end
+    end
+
     return results
 end
 
@@ -611,6 +638,34 @@ function resolve_database_batch_plan(db::VectorDB,filter::Union{Nothing,FilterEx
     return strategy===:auto ? cached_plan_query(db,filter;k=k,config=planner_config,) : plan_query(db,filter;k=k,strategy=strategy,config=planner_config,)
 end
 
+function search_database_exact_batch_locked(db::VectorDB,queries::AbstractMatrix;k::Int)
+    base_vectors=stored_vectors(db.vector_store)
+    base_metadata=stored_metadata(db.metadata_store)
+    vector_norms=db.index===nothing ? nothing : db.index.ivf.vector_norms
+    base_raw=search_exact_batch(base_vectors,base_metadata,queries;k=k,metric=db.metric,vector_norms=vector_norms,excluded=db.index===nothing ? nothing : db.base_tombstones,)
+    delta_vectors=stored_vectors(db.delta_store.vector_store)
+    delta_metadata=stored_metadata(db.delta_store.metadata_store)
+    delta_raw=search_exact_batch(delta_vectors,delta_metadata,queries;k=k,metric=db.metric,)
+    results=Vector{Vector{SearchResult}}(undef,size(queries,2))
+
+    for query_index in axes(queries,2)
+        base_results=database_search_results(base_raw[query_index],db.id_store)
+        delta_results=database_search_results(delta_raw[query_index],db.delta_store.id_store;index_offset=length(db.vector_store),)
+        results[query_index]=merge_database_search_results(base_results,delta_results,k)
+    end
+
+    return results
+end
+
+function use_exact_batch_search(db::VectorDB,filter::Union{Nothing,FilterExpr},plan,kwargs)
+    filter===nothing||return false
+    haskey(kwargs,:nprobe)&&return false
+    haskey(kwargs,:max_nprobe)&&return false
+    strategy=get(kwargs,:strategy,:auto)
+    db.index===nothing&&return strategy in (:auto,:exact)
+    return plan!==nothing&&plan.strategy isa ExactStrategy
+end
+
 function search_database_batch_parallel!(results::Vector{Vector{SearchResult}},db::VectorDB,queries::AbstractMatrix{<:Real},worker_count::Int;kwargs...)
     query_count=size(queries,2)
     jobs=Channel{Int}(query_count)
@@ -664,6 +719,10 @@ function search(db::VectorDB,queries::AbstractMatrix{<:Real};filter::Union{Nothi
         worker_count=resolve_database_batch_workers(query_count;parallel=parallel,workers=workers,parallel_threshold=parallel_threshold,)
         query_count==0&&return results
         batch_plan=resolve_database_batch_plan(db,normalized_filter,kwargs)
+
+        if use_exact_batch_search(db,normalized_filter,batch_plan,kwargs)
+            return search_database_exact_batch_locked(db,queries;k=get(kwargs,:k,10),)
+        end
 
         if worker_count==1
             for index in 1:query_count
@@ -722,7 +781,7 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
     end
 end
 
-function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
+function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
     descriptor=validate_database_snapshot(snapshot_path)
     manifest=load_manifest(snapshot_path)
     descriptor.revision===nothing||descriptor.revision==manifest.revision||throw(ArgumentError("snapshot revision doesnt match manifest"))
@@ -753,6 +812,7 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
         checkpoint_operations=checkpoint_operations,
         checkpoint_bytes=checkpoint_bytes,
         checkpoint_retain_snapshots=checkpoint_retain_snapshots,
+        maintenance_config=maintenance_config,
     )
 
     if manifest.index_revision==manifest.revision&&isfile(index_file_path(snapshot_path))
@@ -764,6 +824,7 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
         db.index=build_filter_aware_ivf(ivf,stored_metadata(metadata_store))
         db.filter_index=build_bitset_index(stored_metadata(metadata_store))
         db.index_revision=manifest.index_revision
+        db.index_bytes=database_index_bytes(db.index,db.filter_index)
     elseif rebuild&&manifest.build_config!==nothing
         config=manifest.build_config
         build!(db;nlists=config.nlists,iterations=config.iterations,seed=config.seed,restarts=config.restarts,training_count=min(length(db),max(config.nlists,config.training_count)),)
@@ -774,7 +835,7 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
     return db
 end
 
-function load_db_from_wal(path::AbstractString;checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
+function load_db_from_wal(path::AbstractString;checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
     wal=read_database_wal(path;repair_tail=true,)
     wal===nothing&&throw(ArgumentError("database WAL does not exist"))
     wal.header.revision==UInt64(0)||throw(ArgumentError("database snapshot is missing for checkpointed WAL"))
@@ -796,15 +857,16 @@ function load_db_from_wal(path::AbstractString;checkpoint_operations::Int=10_000
         checkpoint_operations=checkpoint_operations,
         checkpoint_bytes=checkpoint_bytes,
         checkpoint_retain_snapshots=checkpoint_retain_snapshots,
+        maintenance_config=maintenance_config,
     )
     replay_database_wal!(db)
     validate_database(db)
     return db
 end
 
-function load_db_without_writer_lock(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
+function load_db_without_writer_lock(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
     if isfile(database_wal_path(path))&&!isfile(database_current_path(path))&&!isfile(joinpath(path,"manifest.toml"))&&isempty(database_snapshot_generations(path))
-        return load_db_from_wal(path;checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
+        return load_db_from_wal(path;checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
     end
 
     snapshot_path=try
@@ -815,20 +877,21 @@ function load_db_without_writer_lock(path::AbstractString;iterations::Int=20,see
     end
 
     try
-        return load_db_from_snapshot(path,snapshot_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
+        return load_db_from_snapshot(path,snapshot_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
     catch
         recover||rethrow()
         recovered_path=recover_database_snapshot(path)
-        return load_db_from_snapshot(path,recovered_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
+        return load_db_from_snapshot(path,recovered_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
     end
 end
 
-function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
+function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
     io=acquire_database_writer_lock(path)
 
     try
-        db=load_db_without_writer_lock(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=recover,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
+        db=load_db_without_writer_lock(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=recover,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
         attach_database_writer_lock!(db,io)
+        maybe_schedule_database_maintenance!(db)
         return db
     catch
         release_database_writer_lock(io)
@@ -836,6 +899,6 @@ function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::B
     end
 end
 
-function recover_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
-    return load_db(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=true,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
+function recover_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
+    return load_db(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=true,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
 end

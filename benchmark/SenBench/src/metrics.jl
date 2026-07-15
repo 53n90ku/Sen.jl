@@ -46,7 +46,7 @@ function measure_latency(search_function::Function;repetitions::Int=10,)
     return(result=latest_result,times_ns=times_ns,summary=latency_summary(times_ns),)
 end
 
-function count_exact_candidates(index::BitsetIndex,filter::Union{Nothing,NamedTuple})
+function count_exact_candidates(index::BitsetIndex,filter::Union{Nothing,NamedTuple,FilterExpr})
     filter===nothing&&return index.count
     return count(identity,evaluate_filter(index,filter))
 end
@@ -56,7 +56,7 @@ function count_ivf_candidates(index::IVFIndex,query::AbstractVector;nprobe::Int,
     return sum(length(index.lists[list_index]) for list_index in selected_lists)
 end
 
-function count_ivf_prefilter_work(index::IVFIndex,metadata::AbstractVector,query::AbstractVector,filter::NamedTuple;nprobe::Int,filter_index::Union{Nothing,BitsetIndex}=nothing,)
+function count_ivf_prefilter_work(index::IVFIndex,metadata::AbstractVector,query::AbstractVector,filter::Union{NamedTuple,FilterExpr};nprobe::Int,filter_index::Union{Nothing,BitsetIndex}=nothing,)
     selected_lists=rank_ivf_lists(index,query;nprobe=nprobe,)
     visited_indices=collect_ivf_candidates(index,selected_lists)
     candidate_indices=filter_ivf_candidates(visited_indices,metadata,filter;filter_index=filter_index,)
@@ -64,7 +64,7 @@ function count_ivf_prefilter_work(index::IVFIndex,metadata::AbstractVector,query
     return(visited=length(visited_indices),scored=length(candidate_indices),probed_lists=length(selected_lists),)
 end
 
-function count_ivf_prefilter_work(index::FilterAwareIVFIndex,metadata::AbstractVector,query::AbstractVector,filter::NamedTuple;nprobe::Int,)
+function count_ivf_prefilter_work(index::FilterAwareIVFIndex,metadata::AbstractVector,query::AbstractVector,filter::Union{NamedTuple,FilterExpr};nprobe::Int,)
     length(metadata)==sum(length,index.ivf.lists)||throw(DimensionMismatch("metadata count doesnt match index"))
     selected_lists=rank_ivf_lists(index.ivf,query;nprobe=nprobe,)
     candidate_indices=collect_filtered_list_candidates(index,selected_lists,filter)
@@ -72,7 +72,7 @@ function count_ivf_prefilter_work(index::FilterAwareIVFIndex,metadata::AbstractV
     return(visited=length(candidate_indices),scored=length(candidate_indices),probed_lists=length(selected_lists),)
 end
 
-function count_filter_aware_work(index::FilterAwareIVFIndex,metadata::AbstractVector,query::AbstractVector,filter::NamedTuple;k::Int=10,nprobe::Int,adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)
+function count_filter_aware_work(index::FilterAwareIVFIndex,metadata::AbstractVector,query::AbstractVector,filter::Union{NamedTuple,FilterExpr};k::Int=10,nprobe::Int,adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)
     selection=select_filter_aware_candidates(
         index,
         metadata,
@@ -95,7 +95,7 @@ function count_filter_aware_work(index::FilterAwareIVFIndex,metadata::AbstractVe
     )
 end
 
-function count_filter_aware_candidates(index::FilterAwareIVFIndex,metadata::AbstractVector,query::AbstractVector,filter::NamedTuple;k::Int=10,nprobe::Int,adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)
+function count_filter_aware_candidates(index::FilterAwareIVFIndex,metadata::AbstractVector,query::AbstractVector,filter::Union{NamedTuple,FilterExpr};k::Int=10,nprobe::Int,adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)
     work=count_filter_aware_work(
         index,
         metadata,

@@ -18,11 +18,12 @@ function search_exact(vectors::AbstractMatrix,metadata::AbstractVector,query::Ab
     normalized_filter===nothing||filter_index===nothing||filter_index.count==count||throw(DimensionMismatch("bitset index count doesnt match vectors"))
 
     candidate_indices=if normalized_filter===nothing
-        collect(1:count)
+        1:count
     elseif filter_index!==nothing&&supports_indexed_filter(filter_index,normalized_filter)
-        findall(evaluate_filter(filter_index,normalized_filter))
+        mask=evaluate_filter(filter_index,normalized_filter)
+        (index for index in eachindex(mask) if mask[index])
     else
-        Int[index for index in 1:count if matches_filter(metadata[index],normalized_filter)]
+        (index for index in 1:count if matches_filter(metadata[index],normalized_filter))
     end
 
     return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=vector_norms,excluded=excluded,)

@@ -67,14 +67,20 @@ function filtered_list_candidates(index::FilterAwareIVFIndex,list_index::Int,fil
 end
 
 function collect_filtered_list_candidates(index::FilterAwareIVFIndex,selected_lists::AbstractVector{<:Integer},filter::Union{NamedTuple,FilterExpr},)
-    normalized=normalize_filter(filter)
-    candidate_indices=Int[]
+    return collect_filtered_list_candidates!(Int[],index,selected_lists,normalize_filter(filter))
+end
+
+function collect_filtered_list_candidates!(candidate_indices::Vector{Int},index::FilterAwareIVFIndex,selected_lists::AbstractVector{<:Integer},filter::FilterExpr)
+    empty!(candidate_indices)
 
     for list_index in selected_lists
         1<=list_index<=length(index.ivf.lists)||throw(BoundsError(index.ivf.lists,list_index))
-        mask=_evaluate_list_filter(index,list_index,normalized)
+        mask=_evaluate_list_filter(index,list_index,filter)
         list=index.ivf.lists[list_index]
-        append!(candidate_indices,(list[position] for position in eachindex(mask) if mask[position]))
+
+        for position in eachindex(mask)
+            mask[position]&&push!(candidate_indices,list[position])
+        end
     end
 
     return candidate_indices
@@ -82,10 +88,11 @@ end
 
 function search_ivf_prefilter(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::Union{NamedTuple,FilterExpr},excluded::Union{Nothing,BitVector}=nothing,)
     validate_ivf_search(index.ivf,vectors,metadata,query)
-    selected_lists=rank_ivf_lists(index.ivf,query;nprobe=nprobe,)
-    candidate_indices=collect_filtered_list_candidates(index,selected_lists,filter)
+    workspace=search_workspace()
+    selected_lists=rank_ivf_lists!(workspace.selected_lists,index.ivf,query,nprobe,workspace)
+    candidate_indices=collect_filtered_list_candidates!(workspace.candidate_indices,index,selected_lists,normalize_filter(filter))
 
-    return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=index.ivf.vector_norms,excluded=excluded,)
+    return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=index.ivf.vector_norms,excluded=excluded,workspace=workspace,)
 end
 
 function normalized_scores(values::AbstractVector{<:Real})
@@ -196,9 +203,8 @@ end
 function search_filter_aware_ivf(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::Union{NamedTuple,FilterExpr},adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,excluded::Union{Nothing,BitVector}=nothing,)
     validate_ivf_search(index.ivf,vectors,metadata,query)
 
-    selection=select_filter_aware_candidates(
+    selected_lists=select_filter_aware_lists(
         index,
-        metadata,
         query,
         filter;
         k=k,
@@ -210,6 +216,8 @@ function search_filter_aware_ivf(index::FilterAwareIVFIndex,vectors::AbstractMat
         filter_weight=filter_weight,
         rerank_factor=rerank_factor,
     )
+    workspace=search_workspace()
+    candidate_indices=collect_filtered_list_candidates!(workspace.candidate_indices,index,selected_lists,normalize_filter(filter))
 
-    return score_ivf_candidates(vectors,metadata,query,selection.candidate_indices;k=k,metric=metric,vector_norms=index.ivf.vector_norms,excluded=excluded,)
+    return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=index.ivf.vector_norms,excluded=excluded,workspace=workspace,)
 end

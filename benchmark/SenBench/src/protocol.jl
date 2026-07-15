@@ -120,7 +120,7 @@ function benchmark_database(context::BenchmarkContext,vectors::AbstractMatrix,me
     return VectorDB("benchmark",dim,metric,vector_store,metadata_store,id_store,context.index,context.filter_index,nothing,revision,revision,DatabaseLock(),Dict{Any,Any}(),ReentrantLock())
 end
 
-function search_benchmark_method(context::BenchmarkContext,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,filter::NamedTuple,method::Symbol,nprobe::Int,spec::ExperimentSpec;postfilter_candidate_multiplier::Float64=spec.candidate_multiplier,)
+function search_benchmark_method(context::BenchmarkContext,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,filter::Union{NamedTuple,FilterExpr},method::Symbol,nprobe::Int,spec::ExperimentSpec;postfilter_candidate_multiplier::Float64=spec.candidate_multiplier,)
     if method===:exact
         return search_exact(vectors,metadata,query;k=spec.k,metric=spec.metric,filter=filter,filter_index=context.filter_index,vector_norms=context.index.ivf.vector_norms,)
     elseif method===:ivf_prefilter
@@ -138,7 +138,7 @@ function search_benchmark_method(context::BenchmarkContext,vectors::AbstractMatr
     throw(ArgumentError("unsupported benchmark method"))
 end
 
-function benchmark_method_work(context::BenchmarkContext,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,filter::NamedTuple,method::Symbol,nprobe::Int,spec::ExperimentSpec)
+function benchmark_method_work(context::BenchmarkContext,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,filter::Union{NamedTuple,FilterExpr},method::Symbol,nprobe::Int,spec::ExperimentSpec)
     if method===:exact
         count=count_exact_candidates(context.filter_index,filter)
         return(visited=count,scored=count,probed=0,)
@@ -159,7 +159,7 @@ function benchmark_method_work(context::BenchmarkContext,vectors::AbstractMatrix
     throw(ArgumentError("unsupported benchmark method"))
 end
 
-function execute_benchmark_plan(context::BenchmarkContext,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,filter::NamedTuple,plan::QueryPlan,spec::ExperimentSpec;postfilter_candidate_multiplier::Float64=spec.candidate_multiplier,)
+function execute_benchmark_plan(context::BenchmarkContext,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,filter::Union{NamedTuple,FilterExpr},plan::QueryPlan,spec::ExperimentSpec;postfilter_candidate_multiplier::Float64=spec.candidate_multiplier,)
     method=strategy_name(plan.strategy)
 
     if method===:exact
@@ -177,7 +177,7 @@ function execute_benchmark_plan(context::BenchmarkContext,vectors::AbstractMatri
     return search_benchmark_method(context,vectors,metadata,query,filter,method,max(1,plan.nprobe),spec;postfilter_candidate_multiplier=postfilter_candidate_multiplier,)
 end
 
-function benchmark_plan_work(context::BenchmarkContext,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,filter::NamedTuple,plan::QueryPlan,spec::ExperimentSpec)
+function benchmark_plan_work(context::BenchmarkContext,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,filter::Union{NamedTuple,FilterExpr},plan::QueryPlan,spec::ExperimentSpec)
     method=strategy_name(plan.strategy)
 
     if method===:filter_aware
@@ -389,7 +389,7 @@ function validate_postfilter_rankings(spec::ExperimentSpec,rankings)
     return rankings
 end
 
-function postfilter_prefix_ids(ranked_ids::AbstractVector{<:Integer},metadata::AbstractVector,filter::NamedTuple,k::Int,cutoff::Int)
+function postfilter_prefix_ids(ranked_ids::AbstractVector{<:Integer},metadata::AbstractVector,filter::Union{NamedTuple,FilterExpr},k::Int,cutoff::Int)
     ids=Int[]
     sizehint!(ids,k)
 

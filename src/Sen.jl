@@ -26,11 +26,14 @@ include("storage/wal_store.jl")
 include("planner/calibration.jl")
 include("planner/cost_model.jl")
 include("planner/planner.jl")
+include("maintenance.jl")
+include("observability.jl")
 include("api.jl")
 include("public_api.jl")
 
 
-export VectorDB,SearchResult,PlannerConfig
+export VectorDB,SearchResult,PlannerConfig,DatabaseInfo,database_info
+export MaintenanceConfig,configure_maintenance!,maintenance_status,wait_for_maintenance
 export FilterExpr,Eq,In,Range,And,Or,Not
 export create_db,insert!,upsert!,update!,delete!,get_record
 export build!,rebuild!,is_built,is_dirty

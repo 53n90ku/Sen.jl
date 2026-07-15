@@ -18,22 +18,6 @@ function suffix_maximums(values::AbstractVector{<:Real})
     return suffix
 end
 
-function add_top_candidate!(indices::Vector{Int},scores::Vector{Float32},index::Int,score::Float32,k::Int,minimum_score::Float32,minimum_position::Int)
-    if length(scores)<k
-        push!(indices,index)
-        push!(scores,score)
-        return length(scores)==k ? findmin(scores) : (minimum_score,minimum_position)
-    end
-
-    if score>minimum_score
-        indices[minimum_position]=index
-        scores[minimum_position]=score
-        return findmin(scores)
-    end
-
-    return(minimum_score,minimum_position)
-end
-
 function search_filter_aware_bound_with_stats(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;filter::Union{NamedTuple,FilterExpr},k::Int=10,minimum_nprobe::Int=1,max_nprobe::Int=length(index.ivf.lists),metric::Symbol=:cosine,excluded::Union{Nothing,BitVector}=nothing,)
     validate_ivf_search(index.ivf,vectors,metadata,query)
     validate_excluded(excluded,size(vectors,2))
@@ -57,10 +41,8 @@ function search_filter_aware_bound_with_stats(index::FilterAwareIVFIndex,vectors
     ordered_bounds=Float32[ranking.bounds[list_index] for list_index in ranking.lists]
     remaining_bounds=suffix_maximums(ordered_bounds)
     query_norm=vector_norm(query)
-    top_indices=Int[]
-    top_scores=Float32[]
-    minimum_score=-Inf32
-    minimum_position=0
+    workspace=search_workspace()
+    reset_top_candidates!(workspace,k)
     visited=0
     scored=0
     probed_lists=0
@@ -68,21 +50,24 @@ function search_filter_aware_bound_with_stats(index::FilterAwareIVFIndex,vectors
 
     for(position,list_index) in enumerate(ranking.lists)
         probed_lists>=max_nprobe&&break
-        candidates=filtered_list_candidates(index,list_index,expression)
+        mask=_evaluate_list_filter(index,list_index,expression)
+        list=index.ivf.lists[list_index]
         probed_lists+=1
 
-        for vector_index in candidates
+        for list_position in eachindex(mask)
+            mask[list_position]||continue
+            vector_index=list[list_position]
             excluded!==nothing&&excluded[vector_index]&&continue
             visited+=1
             stored_norm=index.ivf.vector_norms[vector_index]
             iszero(stored_norm)&&throw(ArgumentError("stored vector cannot be zero"))
             score=column_dot(query,vectors,vector_index)/(query_norm*stored_norm)
             scored+=1
-            minimum_score,minimum_position=add_top_candidate!(top_indices,top_scores,vector_index,score,k,minimum_score,minimum_position)
+            add_top_candidate!(workspace,vector_index,score,scored,k)
         end
 
-        if probed_lists>=minimum_nprobe&&length(top_scores)==k
-            threshold=minimum_score
+        if probed_lists>=minimum_nprobe&&length(workspace.heap_scores)==k
+            threshold=workspace.heap_scores[end]
             maximum_unvisited=remaining_bounds[position+1]
 
             if maximum_unvisited<threshold
@@ -92,7 +77,7 @@ function search_filter_aware_bound_with_stats(index::FilterAwareIVFIndex,vectors
         end
     end
 
-    results=rank_scored_candidates(metadata,top_indices,top_scores;k=k,)
+    results=top_candidate_results(metadata,workspace)
     exact=stopped_by_bound||probed_lists==length(ranking.lists)
 
     return(

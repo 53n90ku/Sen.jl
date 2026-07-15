@@ -406,11 +406,11 @@ function build_ivf(vectors::AbstractMatrix;nlists::Int,iterations::Int=20,seed::
     return IVFIndex(centroids,lists,vector_norms,metric,list_radii,list_cos_radii,list_sin_radii)
 end
 
-function centroid_distances(index::IVFIndex,query::AbstractVector)
+function centroid_distances!(distances::Vector{Float32},index::IVFIndex,query::AbstractVector)
     dim,list_count=size(index.centroids)
     length(query)==dim||throw(DimensionMismatch("query dimension doesnt match centroids"))
 
-    distances=Vector{Float32}(undef,list_count)
+    resize!(distances,list_count)
     query_norm=index.metric===:cosine ? vector_norm(query) : 1.0f0
     index.metric===:cosine&&iszero(query_norm)&&throw(ArgumentError("query vector cannot be zero"))
 
@@ -436,6 +436,10 @@ function centroid_distances(index::IVFIndex,query::AbstractVector)
     end
 
     return distances
+end
+
+function centroid_distances(index::IVFIndex,query::AbstractVector)
+    return centroid_distances!(Vector{Float32}(undef,size(index.centroids,2)),index,query)
 end
 
 function list_score_upper_bound(index::IVFIndex,query::AbstractVector,list_index::Int)
@@ -473,17 +477,31 @@ function list_score_upper_bounds(index::IVFIndex,query::AbstractVector)
     return[list_score_upper_bound(index,query,list_index,query_norm) for list_index in eachindex(index.lists)]
 end
 
-function rank_ivf_lists(index::IVFIndex,query::AbstractVector;nprobe::Int,)
+function rank_ivf_lists!(selected_lists::Vector{Int},index::IVFIndex,query::AbstractVector,nprobe::Int,workspace::SearchWorkspace)
     _,list_count=size(index.centroids)
 
     1<=nprobe<=list_count||throw(ArgumentError("nprobe must be between 1 and list count"))
-    distances=centroid_distances(index,query)
+    distances=centroid_distances!(workspace.centroid_distances,index,query)
+    reset_top_candidates!(workspace,nprobe)
 
-    return collect(partialsortperm(distances,1:nprobe,))
+    for list_index in eachindex(distances)
+        add_top_candidate!(workspace,list_index,-distances[list_index],list_index,nprobe)
+    end
+
+    sort_top_candidates!(workspace)
+    empty!(selected_lists)
+    sizehint!(selected_lists,nprobe)
+    append!(selected_lists,workspace.heap_indices)
+    return selected_lists
 end
 
-function collect_ivf_candidates(index::IVFIndex,selected_lists::AbstractVector{<:Integer})
-    candidate_indices=Int[]
+function rank_ivf_lists(index::IVFIndex,query::AbstractVector;nprobe::Int,)
+    workspace=SearchWorkspace()
+    return copy(rank_ivf_lists!(workspace.selected_lists,index,query,nprobe,workspace))
+end
+
+function collect_ivf_candidates!(candidate_indices::Vector{Int},index::IVFIndex,selected_lists::AbstractVector{<:Integer})
+    empty!(candidate_indices)
     sizehint!(candidate_indices,sum(length(index.lists[list_index]) for list_index in selected_lists))
 
     for list_index in selected_lists
@@ -492,6 +510,11 @@ function collect_ivf_candidates(index::IVFIndex,selected_lists::AbstractVector{<
     end
 
     return candidate_indices
+end
+
+function collect_ivf_candidates(index::IVFIndex,selected_lists::AbstractVector{<:Integer})
+    candidate_indices=Int[]
+    return collect_ivf_candidates!(candidate_indices,index,selected_lists)
 end
 
 function _filter_ivf_candidates(candidate_indices::AbstractVector{<:Integer},metadata::AbstractVector,filter::FilterExpr;filter_index::Union{Nothing,BitsetIndex}=nothing,)
@@ -509,30 +532,201 @@ function filter_ivf_candidates(candidate_indices::AbstractVector{<:Integer},meta
     return _filter_ivf_candidates(candidate_indices,metadata,normalize_filter(filter);filter_index=filter_index,)
 end
 
-function score_ivf_candidates(vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,candidate_indices::AbstractVector{<:Integer};k::Int,metric::Symbol,vector_norms::Union{Nothing,AbstractVector}=nothing,excluded::Union{Nothing,BitVector}=nothing,)
-    k>0||throw(ArgumentError("k must be positive"))
-    metric in (:cosine,:dot)||throw(ArgumentError("metric must be cosine or dot"))
-    candidate_indices=exclude_candidates(candidate_indices,excluded,size(vectors,2))
-    isempty(candidate_indices)&&return NamedTuple[]
-    vector_norms!==nothing&&!isempty(vector_norms)&&length(vector_norms)!=size(vectors,2)&&throw(DimensionMismatch("vector norm count doesnt match vectors"))
+function filter_ivf_candidates!(filtered_indices::Vector{Int},candidate_indices::AbstractVector{<:Integer},metadata::AbstractVector,filter::FilterExpr;filter_index::Union{Nothing,BitsetIndex}=nothing,)
+    filter_index===nothing||filter_index.count==length(metadata)||throw(DimensionMismatch("filter index count doesnt match metadata"))
+    empty!(filtered_indices)
 
-    scores=Vector{Float32}(undef,length(candidate_indices))
-    query_norm=metric===:cosine ? vector_norm(query) : 1.0f0
-    metric===:cosine&&iszero(query_norm)&&throw(ArgumentError("query vector cannot be zero"))
-
-    for(position,vector_index) in enumerate(candidate_indices)
-        score=column_dot(query,vectors,vector_index)
-
-        if metric===:cosine
-            stored_norm=vector_norms===nothing||isempty(vector_norms) ? column_norm(vectors,vector_index) : Float32(vector_norms[vector_index])
-            iszero(stored_norm)&&throw(ArgumentError("stored vector cannot be zero"))
-            score/=query_norm*stored_norm
+    if filter_index===nothing||!supports_indexed_filter(filter_index,filter)
+        for index in candidate_indices
+            matches_filter(metadata[index],filter)&&push!(filtered_indices,index)
         end
+    else
+        mask=evaluate_filter(filter_index,filter)
 
-        scores[position]=score
+        for index in candidate_indices
+            mask[index]&&push!(filtered_indices,index)
+        end
     end
 
-    return rank_scored_candidates(metadata,candidate_indices,scores;k=k,)
+    return filtered_indices
+end
+
+function prepare_query_buffer!(workspace::SearchWorkspace,query::AbstractVector)
+    resize!(workspace.query_buffer,length(query))
+
+    @inbounds @simd for index in eachindex(query)
+        workspace.query_buffer[index]=Float32(query[index])
+    end
+
+    return workspace.query_buffer
+end
+
+@inline function candidate_score(vectors::AbstractMatrix,query::AbstractVector,vector_index::Int,metric::Symbol,query_norm::Float32,vector_norms::Union{Nothing,AbstractVector})
+    score=column_dot(query,vectors,vector_index)
+
+    if metric===:cosine
+        stored_norm=vector_norms===nothing||isempty(vector_norms) ? column_norm(vectors,vector_index) : Float32(vector_norms[vector_index])
+        iszero(stored_norm)&&throw(ArgumentError("stored vector cannot be zero"))
+        score/=query_norm*stored_norm
+    end
+
+    return score
+end
+
+function score_candidate_stream!(workspace::SearchWorkspace,vectors::AbstractMatrix,query::AbstractVector,candidate_indices;k::Int,metric::Symbol,vector_norms::Union{Nothing,AbstractVector},excluded::Union{Nothing,BitVector})
+    query_norm=metric===:cosine ? vector_norm(query) : 1.0f0
+    metric===:cosine&&iszero(query_norm)&&throw(ArgumentError("query vector cannot be zero"))
+    order=0
+
+    for raw_index in candidate_indices
+        vector_index=Int(raw_index)
+        excluded!==nothing&&excluded[vector_index]&&continue
+        order+=1
+        score=candidate_score(vectors,query,vector_index,metric,query_norm,vector_norms)
+        add_top_candidate!(workspace,vector_index,score,order,k)
+    end
+
+    return workspace
+end
+
+function score_contiguous_candidates!(workspace::SearchWorkspace,vectors::AbstractMatrix,query::AbstractVector,candidate_indices::AbstractUnitRange{<:Integer};k::Int,metric::Symbol,vector_norms::Union{Nothing,AbstractVector},excluded::Union{Nothing,BitVector})
+    query_buffer=prepare_query_buffer!(workspace,query)
+    query_norm=metric===:cosine ? vector_norm(query_buffer) : 1.0f0
+    metric===:cosine&&iszero(query_norm)&&throw(ArgumentError("query vector cannot be zero"))
+    resize!(workspace.block_scores,SEARCH_SCORE_BLOCK_SIZE)
+    order=0
+    first_index=Int(first(candidate_indices))
+    last_index=Int(last(candidate_indices))
+
+    for block_start in first_index:SEARCH_SCORE_BLOCK_SIZE:last_index
+        block_stop=min(last_index,block_start+SEARCH_SCORE_BLOCK_SIZE-1)
+        block_length=block_stop-block_start+1
+        block_vectors=@view vectors[:,block_start:block_stop]
+        block_scores=@view workspace.block_scores[1:block_length]
+        mul!(block_scores,transpose(block_vectors),query_buffer)
+
+        for offset in 1:block_length
+            vector_index=block_start+offset-1
+            excluded!==nothing&&excluded[vector_index]&&continue
+            order+=1
+            score=block_scores[offset]
+
+            if metric===:cosine
+                stored_norm=vector_norms===nothing||isempty(vector_norms) ? column_norm(vectors,vector_index) : Float32(vector_norms[vector_index])
+                iszero(stored_norm)&&throw(ArgumentError("stored vector cannot be zero"))
+                score/=query_norm*stored_norm
+            end
+
+            add_top_candidate!(workspace,vector_index,score,order,k)
+        end
+    end
+
+    return workspace
+end
+
+function top_candidate_results(metadata::AbstractVector,workspace::SearchWorkspace)
+    sort_top_candidates!(workspace)
+    return[(index=workspace.heap_indices[position],score=workspace.heap_scores[position],metadata=metadata[workspace.heap_indices[position]],) for position in eachindex(workspace.heap_scores)]
+end
+
+function ensure_batch_search_workspace!(workspace::BatchSearchWorkspace,dim::Int,query_count::Int,k::Int)
+    if size(workspace.score_block,1)<SEARCH_SCORE_BLOCK_SIZE||size(workspace.score_block,2)<SEARCH_QUERY_BLOCK_SIZE
+        workspace.score_block=Matrix{Float32}(undef,SEARCH_SCORE_BLOCK_SIZE,SEARCH_QUERY_BLOCK_SIZE)
+    end
+
+    if size(workspace.query_buffer,1)<dim||size(workspace.query_buffer,2)<SEARCH_QUERY_BLOCK_SIZE
+        workspace.query_buffer=Matrix{Float32}(undef,dim,SEARCH_QUERY_BLOCK_SIZE)
+    end
+
+    resize!(workspace.query_norms,query_count)
+
+    while length(workspace.query_workspaces)<query_count
+        push!(workspace.query_workspaces,SearchWorkspace())
+    end
+
+    for query_index in 1:query_count
+        reset_top_candidates!(workspace.query_workspaces[query_index],k)
+    end
+
+    return workspace
+end
+
+function search_exact_batch(vectors::AbstractMatrix,metadata::AbstractVector,queries::AbstractMatrix;k::Int=10,metric::Symbol=:cosine,vector_norms::Union{Nothing,AbstractVector}=nothing,excluded::Union{Nothing,BitVector}=nothing,workspace::BatchSearchWorkspace=batch_search_workspace(),)
+    dim,vector_count=size(vectors)
+    query_dim,query_count=size(queries)
+    query_dim==dim||throw(DimensionMismatch("query dimensions dont match vectors"))
+    length(metadata)==vector_count||throw(DimensionMismatch("metadata count doesnt match vectors"))
+    k>0||throw(ArgumentError("k must be positive"))
+    metric in (:cosine,:dot)||throw(ArgumentError("metric must be cosine or dot"))
+    validate_excluded(excluded,vector_count)
+    vector_norms!==nothing&&!isempty(vector_norms)&&length(vector_norms)!=vector_count&&throw(DimensionMismatch("vector norm count doesnt match vectors"))
+    ensure_batch_search_workspace!(workspace,dim,query_count,k)
+
+    for query_start in 1:SEARCH_QUERY_BLOCK_SIZE:query_count
+        query_stop=min(query_count,query_start+SEARCH_QUERY_BLOCK_SIZE-1)
+        query_length=query_stop-query_start+1
+
+        for local_query in 1:query_length
+            query_index=query_start+local_query-1
+            squared_norm=0.0f0
+
+            @inbounds @simd for axis in 1:dim
+                value=Float32(queries[axis,query_index])
+                workspace.query_buffer[axis,local_query]=value
+                squared_norm+=value*value
+            end
+
+            workspace.query_norms[query_index]=metric===:cosine ? sqrt(squared_norm) : 1.0f0
+            metric===:cosine&&iszero(workspace.query_norms[query_index])&&throw(ArgumentError("query vector cannot be zero"))
+        end
+
+        query_buffer=@view workspace.query_buffer[1:dim,1:query_length]
+
+        for block_start in 1:SEARCH_SCORE_BLOCK_SIZE:vector_count
+            block_stop=min(vector_count,block_start+SEARCH_SCORE_BLOCK_SIZE-1)
+            block_length=block_stop-block_start+1
+            block_vectors=@view vectors[:,block_start:block_stop]
+            block_scores=@view workspace.score_block[1:block_length,1:query_length]
+            mul!(block_scores,transpose(block_vectors),query_buffer)
+
+            for local_vector in 1:block_length
+                vector_index=block_start+local_vector-1
+                excluded!==nothing&&excluded[vector_index]&&continue
+                stored_norm=if metric===:cosine
+                    resolved=vector_norms===nothing||isempty(vector_norms) ? column_norm(vectors,vector_index) : Float32(vector_norms[vector_index])
+                    iszero(resolved)&&throw(ArgumentError("stored vector cannot be zero"))
+                    resolved
+                else
+                    1.0f0
+                end
+
+                for local_query in 1:query_length
+                    query_index=query_start+local_query-1
+                    score=block_scores[local_vector,local_query]
+                    metric===:cosine&&(score/=workspace.query_norms[query_index]*stored_norm)
+                    add_top_candidate!(workspace.query_workspaces[query_index],vector_index,score,vector_index,k)
+                end
+            end
+        end
+    end
+
+    return[top_candidate_results(metadata,workspace.query_workspaces[query_index]) for query_index in 1:query_count]
+end
+
+function score_ivf_candidates(vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,candidate_indices;k::Int,metric::Symbol,vector_norms::Union{Nothing,AbstractVector}=nothing,excluded::Union{Nothing,BitVector}=nothing,workspace::SearchWorkspace=search_workspace(),)
+    k>0||throw(ArgumentError("k must be positive"))
+    metric in (:cosine,:dot)||throw(ArgumentError("metric must be cosine or dot"))
+    validate_excluded(excluded,size(vectors,2))
+    vector_norms!==nothing&&!isempty(vector_norms)&&length(vector_norms)!=size(vectors,2)&&throw(DimensionMismatch("vector norm count doesnt match vectors"))
+    reset_top_candidates!(workspace,k)
+
+    if candidate_indices isa AbstractUnitRange&&eltype(vectors)===Float32&&length(candidate_indices)>=64
+        score_contiguous_candidates!(workspace,vectors,query,candidate_indices;k=k,metric=metric,vector_norms=vector_norms,excluded=excluded,)
+    else
+        score_candidate_stream!(workspace,vectors,query,candidate_indices;k=k,metric=metric,vector_norms=vector_norms,excluded=excluded,)
+    end
+
+    return top_candidate_results(metadata,workspace)
 end
 
 function rank_scored_candidates(metadata::AbstractVector,candidate_indices::AbstractVector{<:Integer},scores::AbstractVector{<:Real};k::Int,)
@@ -562,20 +756,22 @@ end
 
 function search_ivf(index::IVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,excluded::Union{Nothing,BitVector}=nothing,)
     validate_ivf_search(index,vectors,metadata,query)
-    selected_lists=rank_ivf_lists(index,query;nprobe=nprobe,)
-    candidate_indices=collect_ivf_candidates(index,selected_lists)
+    workspace=search_workspace()
+    selected_lists=rank_ivf_lists!(workspace.selected_lists,index,query,nprobe,workspace)
+    candidate_indices=collect_ivf_candidates!(workspace.candidate_indices,index,selected_lists)
 
-    return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=index.vector_norms,excluded=excluded,)
+    return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=index.vector_norms,excluded=excluded,workspace=workspace,)
 end
 
 function search_ivf_prefilter(index::IVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::Union{NamedTuple,FilterExpr},filter_index::Union{Nothing,BitsetIndex}=nothing,excluded::Union{Nothing,BitVector}=nothing,)
     validate_ivf_search(index,vectors,metadata,query)
     normalized_filter=normalize_filter(filter)
-    selected_lists=rank_ivf_lists(index,query;nprobe=nprobe,)
-    visited_indices=collect_ivf_candidates(index,selected_lists)
-    candidate_indices=_filter_ivf_candidates(visited_indices,metadata,normalized_filter;filter_index=filter_index,)
+    workspace=search_workspace()
+    selected_lists=rank_ivf_lists!(workspace.selected_lists,index,query,nprobe,workspace)
+    visited_indices=collect_ivf_candidates!(workspace.candidate_indices,index,selected_lists)
+    candidate_indices=filter_ivf_candidates!(workspace.filtered_indices,visited_indices,metadata,normalized_filter;filter_index=filter_index,)
 
-    return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=index.vector_norms,excluded=excluded,)
+    return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=index.vector_norms,excluded=excluded,workspace=workspace,)
 end
 
 function resolve_postfilter_oversample(minimum_oversample::Int,selectivity::Float64;candidate_multiplier::Float64=4.0,)
@@ -592,7 +788,7 @@ function search_ivf_postfilter(index::IVFIndex,vectors::AbstractMatrix,metadata:
     normalized_filter=normalize_filter(filter)
 
     results=search_ivf(index,vectors,metadata,query;k=k*oversample,nprobe=nprobe,metric=metric,excluded=excluded,)
-    filtered_results=[result for result in results if matches_filter(result.metadata,normalized_filter)]
-
-    return filtered_results[1:min(k,length(filtered_results))]
+    filter!(result->matches_filter(result.metadata,normalized_filter),results)
+    resize!(results,min(k,length(results)))
+    return results
 end

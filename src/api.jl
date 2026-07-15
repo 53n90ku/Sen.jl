@@ -1,4 +1,4 @@
-function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_capacity::Int=0,durable::Bool=true,)
+function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_capacity::Int=0,durable::Bool=true,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
     dim>0||throw(ArgumentError("dimension must be positive"))
     metric in (:cosine,:dot)||throw(ArgumentError("metric must be :cosine or :dot"))
     initial_capacity>=0||throw(ArgumentError("initial capacity cannot be negative"))
@@ -7,7 +7,7 @@ function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_
     metadata_store=create_metadata_store(initial_capacity=initial_capacity,)
     id_store=create_id_store(initial_capacity=initial_capacity,)
 
-    db=VectorDB(String(path),dim,metric,vector_store,metadata_store,id_store,nothing,nothing,nothing,UInt64(0),nothing,DatabaseLock(),Dict{Any,Any}(),ReentrantLock())
+    db=VectorDB(String(path),dim,metric,vector_store,metadata_store,id_store,nothing,nothing,nothing,UInt64(0),nothing,DatabaseLock(),Dict{Any,Any}(),ReentrantLock();checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
 
     if durable
         wal_path=database_wal_path(path)
@@ -16,6 +16,7 @@ function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_
         any(isfile,(wal_path,current_path,manifest_path))&&throw(ArgumentError("database already exists"))
         replace_database_wal(path,db.revision,db.dim,db.metric)
         db.wal_revision=db.revision
+        db.wal_checkpoint_revision=db.revision
     end
 
     return db
@@ -114,6 +115,7 @@ function finish_database_mutation!(db::VectorDB,revision::UInt64)
     db.revision=revision
     clear_plan_cache!(db)
     validate_database_fast(db)
+    maybe_checkpoint_database!(db)
     return db
 end
 
@@ -608,7 +610,7 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
     end
 end
 
-function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,)
+function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
     descriptor=validate_database_snapshot(snapshot_path)
     manifest=load_manifest(snapshot_path)
     descriptor.revision===nothing||descriptor.revision==manifest.revision||throw(ArgumentError("snapshot revision doesnt match manifest"))
@@ -635,7 +637,10 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
         nothing,
         DatabaseLock(),
         Dict{Any,Any}(),
-        ReentrantLock(),
+        ReentrantLock();
+        checkpoint_operations=checkpoint_operations,
+        checkpoint_bytes=checkpoint_bytes,
+        checkpoint_retain_snapshots=checkpoint_retain_snapshots,
     )
 
     if manifest.index_revision==manifest.revision&&isfile(index_file_path(snapshot_path))
@@ -657,7 +662,7 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
     return db
 end
 
-function load_db_from_wal(path::AbstractString)
+function load_db_from_wal(path::AbstractString;checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
     wal=read_database_wal(path;repair_tail=true,)
     wal===nothing&&throw(ArgumentError("database WAL does not exist"))
     wal.header.revision==UInt64(0)||throw(ArgumentError("database snapshot is missing for checkpointed WAL"))
@@ -675,16 +680,19 @@ function load_db_from_wal(path::AbstractString)
         nothing,
         DatabaseLock(),
         Dict{Any,Any}(),
-        ReentrantLock(),
+        ReentrantLock();
+        checkpoint_operations=checkpoint_operations,
+        checkpoint_bytes=checkpoint_bytes,
+        checkpoint_retain_snapshots=checkpoint_retain_snapshots,
     )
     replay_database_wal!(db)
     validate_database(db)
     return db
 end
 
-function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,)
+function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
     if isfile(database_wal_path(path))&&!isfile(database_current_path(path))&&!isfile(joinpath(path,"manifest.toml"))&&isempty(database_snapshot_generations(path))
-        return load_db_from_wal(path)
+        return load_db_from_wal(path;checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
     end
 
     snapshot_path=try
@@ -695,14 +703,14 @@ function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::B
     end
 
     try
-        return load_db_from_snapshot(path,snapshot_path;iterations=iterations,seed=seed,rebuild=rebuild,)
+        return load_db_from_snapshot(path,snapshot_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
     catch
         recover||rethrow()
         recovered_path=recover_database_snapshot(path)
-        return load_db_from_snapshot(path,recovered_path;iterations=iterations,seed=seed,rebuild=rebuild,)
+        return load_db_from_snapshot(path,recovered_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
     end
 end
 
-function recover_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,)
-    return load_db(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=true,)
+function recover_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
+    return load_db(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=true,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
 end

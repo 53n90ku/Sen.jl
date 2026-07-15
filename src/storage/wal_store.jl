@@ -7,6 +7,7 @@ const DATABASE_WAL_PUT=UInt8(1)
 const DATABASE_WAL_DELETE=UInt8(2)
 const DATABASE_WAL_CHECKSUM_BYTES=32
 const DATABASE_WAL_HEADER_BODY_BYTES=27
+const DATABASE_WAL_HEADER_BYTES=DATABASE_WAL_HEADER_BODY_BYTES+DATABASE_WAL_CHECKSUM_BYTES
 const DATABASE_WAL_MAX_RECORD_BYTES=1_073_741_824
 
 struct DatabaseWALRecord
@@ -113,6 +114,7 @@ function ensure_database_wal(db::VectorDB)
     if !isfile(wal_path)
         replace_database_wal(db.path,db.revision,db.dim,db.metric)
         db.wal_revision=db.revision
+        db.wal_checkpoint_revision=db.revision
         return wal_path
     end
 
@@ -128,6 +130,7 @@ function ensure_database_wal(db::VectorDB)
     header.metric===db.metric||throw(ArgumentError("WAL metric doesnt match database"))
     last_revision=isempty(wal.records) ? header.revision : last(wal.records).revision
     db.wal_revision=last_revision
+    db.wal_checkpoint_revision=header.revision
     last_revision==db.revision||throw(ArgumentError("database WAL is ahead of memory; reload the database"))
 
     return wal_path
@@ -333,6 +336,7 @@ function replay_database_wal!(db::VectorDB)
     wal.header.metric===db.metric||throw(ArgumentError("WAL metric doesnt match database"))
     last_revision=isempty(wal.records) ? wal.header.revision : last(wal.records).revision
     db.wal_revision=last_revision
+    db.wal_checkpoint_revision=wal.header.revision
     wal.header.revision>db.revision&&return db
 
     for record in wal.records
@@ -347,9 +351,40 @@ function checkpoint_database_wal!(db::VectorDB)
     try
         path=replace_database_wal(db.path,db.revision,db.dim,db.metric)
         db.wal_revision=db.revision
+        db.wal_checkpoint_revision=db.revision
         return path
     catch
         db.wal_revision=nothing
         rethrow()
+    end
+end
+
+function database_checkpoint_due(db::VectorDB)
+    database_wal_is_active(db)||return false
+    checkpoint_revision=db.wal_checkpoint_revision
+    checkpoint_revision===nothing&&return false
+    checkpoint_revision<=db.revision||return false
+    operations_due=db.checkpoint_operations>0&&db.revision-checkpoint_revision>=UInt64(db.checkpoint_operations)
+    bytes_due=false
+
+    if db.checkpoint_bytes>0
+        wal_path=database_wal_path(db.path)
+        wal_bytes=isfile(wal_path) ? max(0,filesize(wal_path)-DATABASE_WAL_HEADER_BYTES) : 0
+        bytes_due=wal_bytes>=db.checkpoint_bytes
+    end
+
+    return operations_due||bytes_due
+end
+
+function maybe_checkpoint_database!(db::VectorDB)
+    database_checkpoint_due(db)||return false
+
+    try
+        save!(db;retain_snapshots=db.checkpoint_retain_snapshots,)
+        return true
+    catch error
+        error isa InterruptException&&rethrow()
+        @warn "automatic database checkpoint failed; WAL remains durable" exception=(error,catch_backtrace())
+        return false
     end
 end

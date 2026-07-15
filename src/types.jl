@@ -18,6 +18,8 @@ mutable struct VectorDB
     checkpoint_operations::Int
     checkpoint_bytes::Int
     checkpoint_retain_snapshots::Int
+    writer_lock::Union{Nothing,IOStream}
+    closed::Bool
     database_lock::DatabaseLock
     plan_cache::Dict{Any,Any}
     plan_cache_lock::ReentrantLock
@@ -27,7 +29,7 @@ function VectorDB(path::String,dim::Int,metric::Symbol,vector_store::VectorStore
     checkpoint_operations>=0||throw(ArgumentError("checkpoint operations cannot be negative"))
     checkpoint_bytes>=0||throw(ArgumentError("checkpoint bytes cannot be negative"))
     checkpoint_retain_snapshots>0||throw(ArgumentError("checkpoint retain snapshots must be positive"))
-    return VectorDB(path,dim,metric,vector_store,metadata_store,id_store,index,filter_index,build_config,revision,index_revision,create_delta_store(dim),falses(length(vector_store)),length(vector_store),nothing,nothing,checkpoint_operations,checkpoint_bytes,checkpoint_retain_snapshots,database_lock,plan_cache,plan_cache_lock)
+    return VectorDB(path,dim,metric,vector_store,metadata_store,id_store,index,filter_index,build_config,revision,index_revision,create_delta_store(dim),falses(length(vector_store)),length(vector_store),nothing,nothing,checkpoint_operations,checkpoint_bytes,checkpoint_retain_snapshots,nothing,false,database_lock,plan_cache,plan_cache_lock)
 end
 
 struct SearchResult
@@ -39,6 +41,7 @@ end
 
 function Base.length(db::VectorDB)
     return with_database_read(db.database_lock) do
+        ensure_database_open(db)
         db.live_count
     end
 end

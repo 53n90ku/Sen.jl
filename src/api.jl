@@ -10,19 +10,28 @@ function create_db(path::AbstractString;dim::Int,metric::Symbol=:cosine,initial_
     db=VectorDB(String(path),dim,metric,vector_store,metadata_store,id_store,nothing,nothing,nothing,UInt64(0),nothing,DatabaseLock(),Dict{Any,Any}(),ReentrantLock();checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
 
     if durable
-        wal_path=database_wal_path(path)
-        current_path=database_current_path(path)
-        manifest_path=joinpath(path,"manifest.toml")
-        any(isfile,(wal_path,current_path,manifest_path))&&throw(ArgumentError("database already exists"))
-        replace_database_wal(path,db.revision,db.dim,db.metric)
-        db.wal_revision=db.revision
-        db.wal_checkpoint_revision=db.revision
+        io=acquire_database_writer_lock(path)
+
+        try
+            wal_path=database_wal_path(path)
+            current_path=database_current_path(path)
+            manifest_path=joinpath(path,"manifest.toml")
+            any(isfile,(wal_path,current_path,manifest_path))&&throw(ArgumentError("database already exists"))
+            replace_database_wal(path,db.revision,db.dim,db.metric)
+            db.wal_revision=db.revision
+            db.wal_checkpoint_revision=db.revision
+            attach_database_writer_lock!(db,io)
+        catch
+            release_database_writer_lock(io)
+            rethrow()
+        end
     end
 
     return db
 end
 
 function validate_database_fast(db::VectorDB)
+    ensure_database_open(db)
     count=length(db.vector_store)
     count==length(db.metadata_store)==length(db.id_store)||error("database stores are misaligned")
     length(db.id_store.positions)==count||error("database id positions are misaligned")
@@ -568,6 +577,7 @@ end
 
 function save!(db::VectorDB;retain_snapshots::Int=2,)
     return with_database_write(db.database_lock) do
+        activate_database_writer_lock!(db)
         validate_database(db)
         retain_snapshots>0||throw(ArgumentError("retain snapshots must be positive"))
         config=db.build_config
@@ -690,7 +700,7 @@ function load_db_from_wal(path::AbstractString;checkpoint_operations::Int=10_000
     return db
 end
 
-function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
+function load_db_without_writer_lock(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
     if isfile(database_wal_path(path))&&!isfile(database_current_path(path))&&!isfile(joinpath(path,"manifest.toml"))&&isempty(database_snapshot_generations(path))
         return load_db_from_wal(path;checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
     end
@@ -708,6 +718,19 @@ function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::B
         recover||rethrow()
         recovered_path=recover_database_snapshot(path)
         return load_db_from_snapshot(path,recovered_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
+    end
+end
+
+function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,)
+    io=acquire_database_writer_lock(path)
+
+    try
+        db=load_db_without_writer_lock(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=recover,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,)
+        attach_database_writer_lock!(db,io)
+        return db
+    catch
+        release_database_writer_lock(io)
+        rethrow()
     end
 end
 

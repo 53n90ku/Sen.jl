@@ -167,6 +167,7 @@ end
 
 function append_database_wal_body!(db::VectorDB,revision::UInt64,body::Vector{UInt8})
     length(body)<=DATABASE_WAL_MAX_RECORD_BYTES||throw(ArgumentError("database WAL record is too large"))
+    ensure_database_writer_ownership(db)
     wal_path=ensure_database_wal(db)
     revision==next_database_revision(db)||throw(ArgumentError("database WAL append revision is invalid"))
     checksum=sha256(body)
@@ -348,6 +349,8 @@ function replay_database_wal!(db::VectorDB)
 end
 
 function checkpoint_database_wal!(db::VectorDB)
+    ensure_database_writer_ownership(db)
+
     try
         path=replace_database_wal(db.path,db.revision,db.dim,db.metric)
         db.wal_revision=db.revision

@@ -1,0 +1,24 @@
+revision = "main"
+sampling_seed = 42
+vector_count = 1000
+name = "arxiv-for-fanns-small"
+query_count = 10000
+metric = "cosine"
+preprocessing_hash = "4000fe921bca973516500ec9f59613249b7823a02ffe89df66846bbdf4526414"
+dimension = 4096
+source = "https://huggingface.co/datasets/SPCL/arxiv-for-fanns-small"
+license = "dataset card declares no blanket license; source records retain mixed arXiv licenses"
+
+[files]
+"ground_truth_em.ivecs" = "be4c65d48bced70a08e389bd3f11cd4d224015502d391bcaa615aa9c2017c57c"
+"database_attributes.jsonl" = "d0ab61e9dec120fa1b843418f661ff6c01a8d1ee858681fcb78cd8c1abf1456b"
+"query_vectors.fvecs" = "5c782315435e96f9ef77ae30b61a026a61cd7d86dde9335acb1fceee14c42c1f"
+"em_query_attributes.jsonl" = "7d529cf896cca43513c33627b6d4f3352b14e7069a2f50ced2aa157a1687fa5e"
+"database_vectors.fvecs" = "4b7b674aa315a888be5e4c740887c84c5d5c95ed6725ac2dcaa7da7263d70d50"
+
+[file_sizes]
+"ground_truth_em.ivecs" = 3890856
+"database_attributes.jsonl" = 407117
+"query_vectors.fvecs" = 163880000
+"em_query_attributes.jsonl" = 130000
+"database_vectors.fvecs" = 16388000

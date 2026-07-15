@@ -1,3 +1,11 @@
 *.md
 !README.md
+/roadmap.md
 docs/
+test/
+Manifest.toml
+experiments/*.bin
+results/*/raw_results.tsv
+/data/
+/benchmark/external/.venv/
+/benchmark/external/qdrant_storage/

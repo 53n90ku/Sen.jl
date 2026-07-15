@@ -1,0 +1,3 @@
+engine	method	selected_nprobe	train_recall	recall	p50_ms	p95_ms	qps	vector_count	dimension	heldout_queries	target_recall	build_seconds	peak_rss_megabytes	threads	faiss_version
+faiss	exact_prefilter	0	1.0	1.0	12.339708	101.796875	27.461310998715554	300000	4096	256	0.95	34.71122149983421	9126.296875	1	1.14.3
+faiss	ivf_prefilter	256	0.993359375	0.99296875	6.640167	23.193334	94.12110305423496	300000	4096	256	0.95	34.71122149983421	9126.296875	1	1.14.3

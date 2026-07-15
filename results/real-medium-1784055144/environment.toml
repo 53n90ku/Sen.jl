@@ -1,0 +1,16 @@
+heldout_query_indices = [2057, 78, 9120, 79, 516, 1641, 2458, 863, 6361, 1538, 9849, 8817, 76, 7105, 2784, 9414, 6985, 5385, 5285, 9690, 2693, 6933, 5222, 8314, 8712, 5523, 5422, 5085, 9997, 1213, 5007, 7360, 9916, 2508, 7532, 6515, 4401, 99, 7291, 1599, 9631, 6590, 7269, 2175, 2975, 3728, 9683, 8134]
+target_recall = 0.95
+nprobes = [1, 2, 4, 8, 16, 32, 64]
+cpu_threads = 4
+train_query_indices = [3080, 7168, 4998, 8987, 7568, 1874, 7355, 6416, 2460, 5675, 234, 5460, 3690, 4298, 1719, 9326, 8981, 9391, 1551, 7891, 3542, 419, 922, 9948]
+julia_version = "1.12.6"
+architecture = "aarch64"
+passed = true
+k = 10
+experiment = "arxiv-fanns-medium"
+dataset_hash = "73b89e701a23ad5199adc6e57b08ab447a30dd4099c0c6070bf103df9af65c0a"
+julia_threads = 1
+planner_gate = true
+kernel = "Darwin"
+recall_gate = true
+nlists = 64

@@ -1,0 +1,13 @@
+target_recall = 0.95
+confirmation_hash = "ba7d64b9190628bc9f9a1161862f32536f9ae421f586664caaa994b1f9786cee"
+training_count = 50000
+restarts = 3
+iterations = 16
+partition_seed = 42
+configuration_hash = "741ae505db2b1117ed2f4bfd28953ce64f488e995857d378a2ef0e0c4123fba5"
+rare_threshold = 0.01
+dataset_hash = "73b89e701a23ad5199adc6e57b08ab447a30dd4099c0c6070bf103df9af65c0a"
+nprobe = 128
+seed = 42
+index_sha256 = "34f735043cb23e7879c3f3bf107109cff5475b2b1f382701e9974c9f8a2ee105"
+nlists = 512

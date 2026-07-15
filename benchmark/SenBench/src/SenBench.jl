@@ -1,0 +1,87 @@
+module SenBench
+
+using Sen
+using JSON3
+using Mmap
+using SHA
+using TOML
+
+using Sen: BitsetIndex,BoundedFilterAwareIVFStrategy,DatabaseLock,ExactStrategy
+using Sen: FilterAwareIVFIndex,FilterAwareIVFStrategy,IDStore,IVFIndex
+using Sen: IVFPostFilterStrategy
+using Sen: IVFPreFilterStrategy,IVFStrategy,PlannerConfig,PreFilterExactStrategy
+using Sen: MetadataStore,QueryPlan,RecallCalibration,RecallCalibrationEntry
+using Sen: VectorDB,VectorStore
+using Sen: add_calibration_entry!,build_bitset_index,build_filter_aware_ivf,build_ivf
+using Sen: cached_plan_query,column_dot,column_norm,collect_filtered_list_candidates
+using Sen: centroid_distances
+using Sen: collect_ivf_candidates,dot_similarity,estimate_filter_concentration
+using Sen: compute_vector_norms
+using Sen: estimate_selectivity,evaluate_filter,filter_ivf_candidates,matches_filter
+using Sen: plan_query,rank_ivf_lists
+using Sen: resolve_postfilter_oversample,search_exact,search_filter_aware_bound
+using Sen: search_filter_aware_bound_with_stats,search_filter_aware_ivf,search_ivf
+using Sen: search_ivf_postfilter,search_ivf_prefilter,select_filter_aware_candidates
+using Sen: lookup_calibrated_nprobe,stored_vectors,strategy_name,vector_norm
+using Sen: load_ivf_index,save_ivf_index
+
+include("datasets.jl")
+include("dataset_manifest.jl")
+include("groundtruth.jl")
+include("real_data.jl")
+include("ranged_dataset.jl")
+include("block_groundtruth.jl")
+include("index_diagnostics.jl")
+include("ivf_sweep.jl")
+include("metrics.jl")
+include("runner.jl")
+include("selectivity_sweep.jl")
+include("sweeps.jl")
+include("workloads.jl")
+include("calibration.jl")
+include("protocol.jl")
+include("real_protocol.jl")
+
+export generate_synthetic_dataset,generate_synthetic_queries
+export generate_clustered_dataset,generate_clustered_queries
+export load_fvecs
+export DatasetManifest,create_dataset_manifest,save_dataset_manifest,load_dataset_manifest
+export validate_dataset_manifest,file_sha256
+export compute_groundtruth
+export groundtruth_cache_signature,save_ivecs,save_groundtruth_cache,load_groundtruth_cache
+export RealQuerySplit,RealQueryPartitions,ArxivFANNSDataset
+export download_arxiv_fanns,load_arxiv_fanns,verify_arxiv_groundtruth
+export fvecs_info,ivecs_info,load_fvecs_indices,load_ivecs_indices
+export load_arxiv_metadata,load_arxiv_query_labels,stratified_query_split
+export stratified_query_partitions,validate_query_partitions
+export balanced_query_partitions
+export save_query_partitions,load_query_partitions,query_partition_indices
+export load_arxiv_fanns_indices
+export RangedSubsetSpec,prepare_arxiv_subset,load_arxiv_subset
+export load_f32_matrix,disk_available_bytes
+export compute_blockwise_groundtruth,load_or_compute_blockwise_groundtruth
+export dataset_selectivities
+export percentile,gini_coefficient,selectivity_bucket,probe_schedule
+export ivf_index_diagnostics,ivf_routing_diagnostics,ivf_probe_curve
+export aggregate_probe_curve,ivf_sweep_configuration_hash
+export run_ivf_quality_configuration,run_ivf_quality_sweep
+export evaluate_hybrid_validation,save_hybrid_validation
+export bootstrap_recall_interval
+export recall_at_k,latency_summary,measure_latency
+export count_exact_candidates,count_ivf_candidates,count_ivf_prefilter_work
+export count_filter_aware_candidates,count_filter_aware_work
+export BenchmarkContext,build_benchmark_context,benchmark_summary,run_benchmark
+export generate_selectivity_order,generate_selectivity_metadata,run_selectivity_sweep
+export run_nprobe_sweep,sweep_points,pareto_frontier,best_at_recall
+export conservative_at_recall,compare_at_recall
+export generate_filter_order,generate_filter_metadata
+export add_sweep_calibration!,calibrate_recall,evaluate_recall_calibration
+export ExperimentSpec,experiment_methods,generate_experiment_base,generate_experiment_data
+export build_postfilter_rankings
+export evaluate_benchmark_method,select_sweep_method,select_benchmark_methods
+export run_claim_benchmark,experiment_summary_rows,write_tsv,save_experiment_suite
+export experiment_aggregate_rows,claim_aggregate_rows
+export real_experiment_spec,run_real_benchmark,real_benchmark_summary_rows
+export save_real_benchmark,benchmark_qps
+
+end

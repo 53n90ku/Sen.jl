@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600">
+<rect width="100%" height="100%" fill="#0b1020"/>
+<text x="92" y="36" fill="#f8fafc" font-family="system-ui,sans-serif" font-size="24" font-weight="700">Average vectors scored</text>
+<line x1="92" y1="524.0" x2="730" y2="524.0" stroke="#26324d" stroke-width="1"/>
+<text x="80" y="529.0" text-anchor="end" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="13">6918</text>
+<line x1="92" y1="433.6" x2="730" y2="433.6" stroke="#26324d" stroke-width="1"/>
+<text x="80" y="438.6" text-anchor="end" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="13">20137</text>
+<line x1="92" y1="343.2" x2="730" y2="343.2" stroke="#26324d" stroke-width="1"/>
+<text x="80" y="348.2" text-anchor="end" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="13">58613</text>
+<line x1="92" y1="252.8" x2="730" y2="252.8" stroke="#26324d" stroke-width="1"/>
+<text x="80" y="257.8" text-anchor="end" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="13">170607</text>
+<line x1="92" y1="162.39999999999998" x2="730" y2="162.39999999999998" stroke="#26324d" stroke-width="1"/>
+<text x="80" y="167.39999999999998" text-anchor="end" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="13">496591</text>
+<line x1="92" y1="72.0" x2="730" y2="72.0" stroke="#26324d" stroke-width="1"/>
+<text x="80" y="77.0" text-anchor="end" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="13">1445441</text>
+<line x1="92.0" y1="72" x2="92.0" y2="524" stroke="#18233a" stroke-width="1"/>
+<text x="92.0" y="554" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="14">1.0%</text>
+<line x1="411.0" y1="72" x2="411.0" y2="524" stroke="#18233a" stroke-width="1"/>
+<text x="411.0" y="554" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="14">5.0%</text>
+<line x1="730.0" y1="72" x2="730.0" y2="524" stroke="#18233a" stroke-width="1"/>
+<text x="730.0" y="554" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="14">10.0%</text>
+<line x1="92" y1="524" x2="730" y2="524" stroke="#64748b" stroke-width="2"/>
+<line x1="92" y1="72" x2="92" y2="524" stroke="#64748b" stroke-width="2"/>
+<polyline points="92.0,492.82645803536695 411.0,356.6482135385859 730.0,297.99943591423516" fill="none" stroke="#94a3b8" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="92.0" cy="492.82645803536695" r="5" fill="#94a3b8" stroke="#0b1020" stroke-width="2"/>
+<circle cx="411.0" cy="356.6482135385859" r="5" fill="#94a3b8" stroke="#0b1020" stroke-width="2"/>
+<circle cx="730.0" cy="297.99943591423516" r="5" fill="#94a3b8" stroke="#0b1020" stroke-width="2"/>
+<polyline points="92.0,492.82645803536695 411.0,356.6482135385859 730.0,357.01560690559944" fill="none" stroke="#60a5fa" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="92.0" cy="492.82645803536695" r="5" fill="#60a5fa" stroke="#0b1020" stroke-width="2"/>
+<circle cx="411.0" cy="356.6482135385859" r="5" fill="#60a5fa" stroke="#0b1020" stroke-width="2"/>
+<circle cx="730.0" cy="357.01560690559944" r="5" fill="#60a5fa" stroke="#0b1020" stroke-width="2"/>
+<polyline points="92.0,103.17241379310349 411.0,103.17241379310349 730.0,161.64335978516277" fill="none" stroke="#f97316" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="92.0" cy="103.17241379310349" r="5" fill="#f97316" stroke="#0b1020" stroke-width="2"/>
+<circle cx="411.0" cy="103.17241379310349" r="5" fill="#f97316" stroke="#0b1020" stroke-width="2"/>
+<circle cx="730.0" cy="161.64335978516277" r="5" fill="#f97316" stroke="#0b1020" stroke-width="2"/>
+<polyline points="92.0,492.82645803536695 411.0,356.6482135385859 730.0,309.5199548239543" fill="none" stroke="#22c55e" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="92.0" cy="492.82645803536695" r="5" fill="#22c55e" stroke="#0b1020" stroke-width="2"/>
+<circle cx="411.0" cy="356.6482135385859" r="5" fill="#22c55e" stroke="#0b1020" stroke-width="2"/>
+<circle cx="730.0" cy="309.5199548239543" r="5" fill="#22c55e" stroke="#0b1020" stroke-width="2"/>
+<polyline points="92.0,492.8275862068965 411.0,356.8290256518661 730.0,356.1554589057506" fill="none" stroke="#a78bfa" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="92.0" cy="492.8275862068965" r="5" fill="#a78bfa" stroke="#0b1020" stroke-width="2"/>
+<circle cx="411.0" cy="356.8290256518661" r="5" fill="#a78bfa" stroke="#0b1020" stroke-width="2"/>
+<circle cx="730.0" cy="356.1554589057506" r="5" fill="#a78bfa" stroke="#0b1020" stroke-width="2"/>
+<polyline points="92.0,492.8275862068965 411.0,356.8290256518661 730.0,357.01560690559944" fill="none" stroke="#facc15" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="92.0" cy="492.8275862068965" r="5" fill="#facc15" stroke="#0b1020" stroke-width="2"/>
+<circle cx="411.0" cy="356.8290256518661" r="5" fill="#facc15" stroke="#0b1020" stroke-width="2"/>
+<circle cx="730.0" cy="357.01560690559944" r="5" fill="#facc15" stroke="#0b1020" stroke-width="2"/>
+<line x1="758" y1="102" x2="786" y2="102" stroke="#94a3b8" stroke-width="4"/>
+<text x="796" y="107" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="14">Exact filtered</text>
+<line x1="758" y1="132" x2="786" y2="132" stroke="#60a5fa" stroke-width="4"/>
+<text x="796" y="137" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="14">IVF prefilter</text>
+<line x1="758" y1="162" x2="786" y2="162" stroke="#f97316" stroke-width="4"/>
+<text x="796" y="167" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="14">IVF postfilter</text>
+<line x1="758" y1="192" x2="786" y2="192" stroke="#22c55e" stroke-width="4"/>
+<text x="796" y="197" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="14">Filter-aware IVF</text>
+<line x1="758" y1="222" x2="786" y2="222" stroke="#a78bfa" stroke-width="4"/>
+<text x="796" y="227" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="14">Bounded filter-aware</text>
+<line x1="758" y1="252" x2="786" y2="252" stroke="#facc15" stroke-width="4"/>
+<text x="796" y="257" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="14">AutoPlanner</text>
+<text x="411.0" y="580" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="15">Filter selectivity</text>
+<text x="24" y="298.0" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="15" transform="rotate(-90 24 298.0)">Candidates scored (log scale)</text>
+</svg>

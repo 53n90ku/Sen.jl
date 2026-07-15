@@ -1,0 +1,2 @@
+engine	method	selected_ef	train_recall	recall	p50_ms	p95_ms	qps	vector_count	dimension	heldout_queries	target_recall	build_seconds	storage_megabytes	server_version	client_version
+qdrant	filtered_hnsw	4096	0.783203125	0.780859375	21.191125	55.207041	43.5805447015761	100000	4096	256	0.95	0.0	1890.9093027114868	1.18.1	1.18.0

@@ -1,6 +1,7 @@
-function rank_bound_lists(index::FilterAwareIVFIndex,query::AbstractVector,filter::NamedTuple,)
+function rank_bound_lists(index::FilterAwareIVFIndex,query::AbstractVector,filter::Union{NamedTuple,FilterExpr},)
+    expression=normalize_filter(filter)
     bounds=list_score_upper_bounds(index.ivf,query)
-    counts=[estimate_list_filter_count(index,list_index,filter) for list_index in eachindex(index.ivf.lists)]
+    counts=[estimate_list_filter_count(index,list_index,expression) for list_index in eachindex(index.ivf.lists)]
     lists=Int[list_index for list_index in eachindex(index.ivf.lists) if counts[list_index]>0]
     sort!(lists;by=list_index->(bounds[list_index],counts[list_index]),rev=true,)
 
@@ -33,7 +34,7 @@ function add_top_candidate!(indices::Vector{Int},scores::Vector{Float32},index::
     return(minimum_score,minimum_position)
 end
 
-function search_filter_aware_bound_with_stats(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;filter::NamedTuple,k::Int=10,minimum_nprobe::Int=1,max_nprobe::Int=length(index.ivf.lists),metric::Symbol=:cosine,excluded::Union{Nothing,BitVector}=nothing,)
+function search_filter_aware_bound_with_stats(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;filter::Union{NamedTuple,FilterExpr},k::Int=10,minimum_nprobe::Int=1,max_nprobe::Int=length(index.ivf.lists),metric::Symbol=:cosine,excluded::Union{Nothing,BitVector}=nothing,)
     validate_ivf_search(index.ivf,vectors,metadata,query)
     validate_excluded(excluded,size(vectors,2))
     k>0||throw(ArgumentError("k must be positive"))
@@ -42,7 +43,8 @@ function search_filter_aware_bound_with_stats(index::FilterAwareIVFIndex,vectors
     1<=minimum_nprobe<=length(index.ivf.lists)||throw(ArgumentError("minimum nprobe must be between 1 and list count"))
     minimum_nprobe<=max_nprobe<=length(index.ivf.lists)||throw(ArgumentError("max nprobe must be between minimum nprobe and list count"))
 
-    ranking=rank_bound_lists(index,query,filter)
+    expression=normalize_filter(filter)
+    ranking=rank_bound_lists(index,query,expression)
     isempty(ranking.lists)&&return(
         results=NamedTuple[],
         visited=0,
@@ -66,7 +68,7 @@ function search_filter_aware_bound_with_stats(index::FilterAwareIVFIndex,vectors
 
     for(position,list_index) in enumerate(ranking.lists)
         probed_lists>=max_nprobe&&break
-        candidates=filtered_list_candidates(index,list_index,filter)
+        candidates=filtered_list_candidates(index,list_index,expression)
         probed_lists+=1
 
         for vector_index in candidates
@@ -103,7 +105,7 @@ function search_filter_aware_bound_with_stats(index::FilterAwareIVFIndex,vectors
     )
 end
 
-function search_filter_aware_bound(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;filter::NamedTuple,k::Int=10,minimum_nprobe::Int=1,max_nprobe::Int=length(index.ivf.lists),metric::Symbol=:cosine,excluded::Union{Nothing,BitVector}=nothing,)
+function search_filter_aware_bound(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;filter::Union{NamedTuple,FilterExpr},k::Int=10,minimum_nprobe::Int=1,max_nprobe::Int=length(index.ivf.lists),metric::Symbol=:cosine,excluded::Union{Nothing,BitVector}=nothing,)
     stats=search_filter_aware_bound_with_stats(index,vectors,metadata,query;filter=filter,k=k,minimum_nprobe=minimum_nprobe,max_nprobe=max_nprobe,metric=metric,excluded=excluded,)
     return stats.results
 end

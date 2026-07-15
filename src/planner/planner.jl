@@ -29,7 +29,9 @@ function planner_config_key(config::PlannerConfig)
     )
 end
 
-function cached_plan_query(db::VectorDB,filter::Union{Nothing,NamedTuple};k::Int=10,config::PlannerConfig=PlannerConfig(),)
+function cached_plan_query(db::VectorDB,filter::Union{Nothing,NamedTuple,FilterExpr};k::Int=10,config::PlannerConfig=PlannerConfig(),)
+    filter=normalize_filter(filter)
+
     return with_database_read(db.database_lock) do
         key=(db.revision,db.index_revision,filter,k,planner_config_key(config),)
         lock(db.plan_cache_lock)
@@ -56,15 +58,43 @@ function strategy_name(strategy::SearchStrategy)
     return :ivf
 end
 
-function choose_strategy(db::VectorDB,filter::Union{Nothing,NamedTuple};k::Int=10,config::PlannerConfig=PlannerConfig(),)
+function exact_query_plan(db::VectorDB,filter::Union{Nothing,FilterExpr};reason::String="exact search was selected",config::PlannerConfig=PlannerConfig(),)
+    if filter===nothing
+        matching_count=length(db)
+        selectivity=matching_count==0 ? 0.0 : 1.0
+        estimated_cost=matching_count*db.dim*config.vector_score_cost
+    else
+        stats=logical_filter_stats(db,filter)
+        matching_count=stats.matching_count
+        selectivity=stats.logical_selectivity
+        estimated_cost=stats.logical_count*config.metadata_check_cost+matching_count*db.dim*config.vector_score_cost
+    end
+
+    costs=(exact=estimated_cost,)
+    strategy=filter===nothing ? ExactStrategy() : PreFilterExactStrategy()
+    return QueryPlan(strategy,selectivity,matching_count,0,0,estimated_cost,costs,reason)
+end
+
+function supports_list_filter(index::FilterAwareIVFIndex,filter::FilterExpr)
+    return all(metadata_index->supports_indexed_filter(metadata_index,filter),index.metadata_indexes)
+end
+
+function choose_strategy(db::VectorDB,filter::Union{Nothing,NamedTuple,FilterExpr};k::Int=10,config::PlannerConfig=PlannerConfig(),)
+    filter=normalize_filter(filter)
     k>0||throw(ArgumentError("k must be positive"))
 
     if filter===nothing
+        db.index===nothing&&return exact_query_plan(db,nothing;reason="database has no built index",config=config,)
         list_count=db.index===nothing ? config.max_nprobe : length(db.index.ivf.lists)
         nprobe=min(config.default_nprobe,list_count)
         costs=(ivf=Float64(length(db)*db.dim),)
         return QueryPlan(IVFStrategy(),1.0,length(db),nprobe,nprobe,costs.ivf,costs,"query has no filter")
     end
+
+    db.index===nothing&&return exact_query_plan(db,filter;reason="database has no built index",config=config,)
+    stats=logical_filter_stats(db,filter)
+    stats.base_live_count==0&&return exact_query_plan(db,filter;reason="no indexed live vectors remain",config=config,)
+    supports_list_filter(db.index,filter)||return exact_query_plan(db,filter;reason="filter expression requires exact scalar evaluation",config=config,)
 
     estimates=estimate_strategy_costs(db,filter;k=k,config=config,)
 
@@ -100,7 +130,7 @@ function choose_strategy(db::VectorDB,filter::Union{Nothing,NamedTuple};k::Int=1
     )
 end
 
-function strategy_from_symbol(filter::Union{Nothing,NamedTuple},strategy::Symbol)
+function strategy_from_symbol(filter::Union{Nothing,FilterExpr},strategy::Symbol)
     if strategy===:exact
         return filter===nothing ? ExactStrategy() : PreFilterExactStrategy()
     elseif strategy===:ivf
@@ -123,7 +153,10 @@ function strategy_from_symbol(filter::Union{Nothing,NamedTuple},strategy::Symbol
     throw(ArgumentError("unknown search strategy"))
 end
 
-function plan_query(db::VectorDB,filter::Union{Nothing,NamedTuple};k::Int=10,strategy::Symbol=:auto,config::PlannerConfig=PlannerConfig(),)
+function plan_query(db::VectorDB,filter::Union{Nothing,NamedTuple,FilterExpr};k::Int=10,strategy::Symbol=:auto,config::PlannerConfig=PlannerConfig(),)
+    filter=normalize_filter(filter)
+    k>0||throw(ArgumentError("k must be positive"))
+    strategy===:exact&&return exact_query_plan(db,filter;reason="exact strategy selected manually",config=config,)
     automatic_plan=choose_strategy(db,filter;k=k,config=config,)
     strategy===:auto&&return automatic_plan
 

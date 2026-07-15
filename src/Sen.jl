@@ -31,6 +31,7 @@ include("public_api.jl")
 
 
 export VectorDB,SearchResult,PlannerConfig
+export FilterExpr,Eq,In,Range,And,Or,Not
 export create_db,insert!,upsert!,update!,delete!,get_record
 export build!,rebuild!,is_built,is_dirty
 export search,plan_query

@@ -513,7 +513,7 @@ function merge_database_search_results(base_results::Vector{SearchResult},delta_
     return results
 end
 
-function search_database_locked(db::VectorDB,query::AbstractVector{<:Real};k::Int=10,nprobe::Union{Nothing,Int}=nothing,filter::Union{Nothing,NamedTuple}=nothing,strategy::Symbol=:auto,planner_config::PlannerConfig=PlannerConfig(),postfilter_oversample::Int=10,adaptive_postfilter::Bool=true,adaptive::Bool=true,max_nprobe::Union{Nothing,Int}=nothing,candidate_multiplier::Float64=planner_config.candidate_multiplier,postfilter_candidate_multiplier::Float64=planner_config.postfilter_candidate_multiplier,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,_plan::Union{Nothing,QueryPlan}=nothing,)
+function search_database_locked(db::VectorDB,query::AbstractVector{<:Real};k::Int=10,nprobe::Union{Nothing,Int}=nothing,filter::Union{Nothing,FilterExpr}=nothing,strategy::Symbol=:auto,planner_config::PlannerConfig=PlannerConfig(),postfilter_oversample::Int=10,adaptive_postfilter::Bool=true,adaptive::Bool=true,max_nprobe::Union{Nothing,Int}=nothing,candidate_multiplier::Float64=planner_config.candidate_multiplier,postfilter_candidate_multiplier::Float64=planner_config.postfilter_candidate_multiplier,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,_plan::Union{Nothing,QueryPlan}=nothing,)
     length(query)==db.dim||throw(DimensionMismatch("query dimension doesnt match database"))
     k>0||throw(ArgumentError("k must be positive"))
     strategy===:auto||strategy_from_symbol(filter,strategy)
@@ -522,6 +522,7 @@ function search_database_locked(db::VectorDB,query::AbstractVector{<:Real};k::In
     index=db.index
 
     if index===nothing
+        strategy in (:auto,:exact)||throw(ArgumentError("search strategy $(strategy) requires a built index"))
         raw_results=search_exact(base_vectors,base_metadata,query;k=k,metric=db.metric,filter=filter,)
         return database_search_results(raw_results,db.id_store)
     end
@@ -558,10 +559,12 @@ function search_database_locked(db::VectorDB,query::AbstractVector{<:Real};k::In
     return merge_database_search_results(base_results,delta_results,k)
 end
 
-function search(db::VectorDB,query::AbstractVector{<:Real};kwargs...)
+function search(db::VectorDB,query::AbstractVector{<:Real};filter::Union{Nothing,NamedTuple,FilterExpr}=nothing,kwargs...)
+    normalized_filter=normalize_filter(filter)
+
     return with_database_read(db.database_lock) do
         validate_database_fast(db)
-        search_database_locked(db,query;kwargs...)
+        search_database_locked(db,query;filter=normalized_filter,kwargs...)
     end
 end
 
@@ -600,9 +603,8 @@ function resolve_database_batch_workers(query_count::Int;parallel::Bool,workers:
     return max(1,min(query_count,workers,Threads.nthreads(:default)))
 end
 
-function resolve_database_batch_plan(db::VectorDB,kwargs)
+function resolve_database_batch_plan(db::VectorDB,filter::Union{Nothing,FilterExpr},kwargs)
     db.index===nothing&&return nothing
-    filter=get(kwargs,:filter,nothing)
     k=get(kwargs,:k,10)
     strategy=get(kwargs,:strategy,:auto)
     planner_config=get(kwargs,:planner_config,PlannerConfig())
@@ -651,7 +653,9 @@ function search_database_batch_parallel!(results::Vector{Vector{SearchResult}},d
     return results
 end
 
-function search(db::VectorDB,queries::AbstractMatrix{<:Real};parallel::Bool=true,workers::Int=Threads.nthreads(:default),parallel_threshold::Int=DEFAULT_BATCH_PARALLEL_THRESHOLD,kwargs...)
+function search(db::VectorDB,queries::AbstractMatrix{<:Real};filter::Union{Nothing,NamedTuple,FilterExpr}=nothing,parallel::Bool=true,workers::Int=Threads.nthreads(:default),parallel_threshold::Int=DEFAULT_BATCH_PARALLEL_THRESHOLD,kwargs...)
+    normalized_filter=normalize_filter(filter)
+
     return with_database_read(db.database_lock) do
         validate_database_fast(db)
         size(queries,1)==db.dim||throw(DimensionMismatch("query dimensions dont match database"))
@@ -659,17 +663,17 @@ function search(db::VectorDB,queries::AbstractMatrix{<:Real};parallel::Bool=true
         results=Vector{Vector{SearchResult}}(undef,query_count)
         worker_count=resolve_database_batch_workers(query_count;parallel=parallel,workers=workers,parallel_threshold=parallel_threshold,)
         query_count==0&&return results
-        batch_plan=resolve_database_batch_plan(db,kwargs)
+        batch_plan=resolve_database_batch_plan(db,normalized_filter,kwargs)
 
         if worker_count==1
             for index in 1:query_count
-                results[index]=search_database_locked(db,@view(queries[:,index]);_plan=batch_plan,kwargs...)
+                results[index]=search_database_locked(db,@view(queries[:,index]);filter=normalized_filter,_plan=batch_plan,kwargs...)
             end
 
             return results
         end
 
-        return search_database_batch_parallel!(results,db,queries,worker_count;_plan=batch_plan,kwargs...)
+        return search_database_batch_parallel!(results,db,queries,worker_count;filter=normalized_filter,_plan=batch_plan,kwargs...)
     end
 end
 

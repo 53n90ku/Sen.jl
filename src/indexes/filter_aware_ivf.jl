@@ -1,41 +1,19 @@
 struct FilterAwareIVFIndex
     ivf::IVFIndex
-    metadata_counts::Vector{Dict{Tuple{Symbol,Any},Int}}
-    metadata_masks::Vector{Dict{Tuple{Symbol,Any},BitVector}}
-    metadata_postings::Vector{Dict{Tuple{Symbol,Any},Vector{Int}}}
+    metadata_indexes::Vector{MetadataIndex}
 end
 
 function build_filter_aware_ivf(ivf::IVFIndex,metadata::AbstractVector)::FilterAwareIVFIndex
     vector_count=sum(length,ivf.lists)
     length(metadata)==vector_count||throw(DimensionMismatch("metadata count doesnt match vectors"))
 
-    metadata_counts=[Dict{Tuple{Symbol,Any},Int}() for _ in ivf.lists]
-    metadata_masks=[Dict{Tuple{Symbol,Any},BitVector}() for _ in ivf.lists]
-    metadata_postings=[Dict{Tuple{Symbol,Any},Vector{Int}}() for _ in ivf.lists]
+    metadata_indexes=Vector{MetadataIndex}(undef,length(ivf.lists))
 
     for list_index in eachindex(ivf.lists)
-        counts=metadata_counts[list_index]
-        masks=metadata_masks[list_index]
-        postings=metadata_postings[list_index]
-        list_size=length(ivf.lists[list_index])
-
-        for(position,vector_index) in enumerate(ivf.lists[list_index])
-            for(field,value) in pairs(metadata[vector_index])
-                key=(field,value)
-                counts[key]=get(counts,key,0)+1
-                mask=get!(masks,key) do
-                    falses(list_size)
-                end
-                mask[position]=true
-                posting=get!(postings,key) do
-                    Int[]
-                end
-                push!(posting,vector_index)
-            end
-        end
+        metadata_indexes[list_index]=build_metadata_index(view(metadata,ivf.lists[list_index]))
     end
 
-    return FilterAwareIVFIndex(ivf,metadata_counts,metadata_masks,metadata_postings)
+    return FilterAwareIVFIndex(ivf,metadata_indexes)
 end
 
 function build_filter_aware_ivf(vectors::AbstractMatrix,metadata::AbstractVector;nlists::Int,iterations::Int=20,seed::Int=42,metric::Symbol=:cosine,restarts::Int=1,training_count::Int=size(vectors,2),)::FilterAwareIVFIndex
@@ -43,73 +21,66 @@ function build_filter_aware_ivf(vectors::AbstractMatrix,metadata::AbstractVector
     return build_filter_aware_ivf(ivf,metadata)
 end
 
-function estimate_list_filter_density(index::FilterAwareIVFIndex,list_index::Int,filter::NamedTuple,)::Float64
+function validate_list_filter_capability(metadata_index::MetadataIndex,filter::FilterExpr)
+    if filter isa And||filter isa Or
+        foreach(child->validate_list_filter_capability(metadata_index,child),filter.children)
+    elseif filter isa Not
+        validate_list_filter_capability(metadata_index,filter.child)
+    elseif !supports_indexed_filter(metadata_index,filter)
+        field=filter isa Union{Eq,In,Range} ? " for field $(repr(filter.field))" : ""
+        throw(ArgumentError("list metadata index cannot evaluate $(nameof(typeof(filter)))$(field)"))
+    end
+
+    return filter
+end
+
+function _evaluate_list_filter(index::FilterAwareIVFIndex,list_index::Int,filter::FilterExpr)
+    metadata_index=index.metadata_indexes[list_index]
+    validate_list_filter_capability(metadata_index,filter)
+    return evaluate_filter(metadata_index,filter)
+end
+
+function estimate_list_filter_density(index::FilterAwareIVFIndex,list_index::Int,filter::Union{NamedTuple,FilterExpr},)::Float64
     1<=list_index<=length(index.ivf.lists)||throw(BoundsError(index.ivf.lists,list_index))
+    normalized=normalize_filter(filter)
 
     list_size=length(index.ivf.lists[list_index])
     list_size==0&&return 0.0
 
-    return estimate_list_filter_count(index,list_index,filter)/list_size
+    return count(_evaluate_list_filter(index,list_index,normalized))/list_size
 end
 
-function evaluate_list_filter(index::FilterAwareIVFIndex,list_index::Int,filter::NamedTuple,)
+function evaluate_list_filter(index::FilterAwareIVFIndex,list_index::Int,filter::Union{NamedTuple,FilterExpr},)
     1<=list_index<=length(index.ivf.lists)||throw(BoundsError(index.ivf.lists,list_index))
-
-    list_size=length(index.ivf.lists[list_index])
-    isempty(filter)&&return trues(list_size)
-    masks=index.metadata_masks[list_index]
-
-    if length(filter)==1
-        field,expected_value=first(pairs(filter))
-        mask=get(masks,(field,expected_value),nothing)
-        return mask===nothing ? falses(list_size) : mask
-    end
-
-    matches=trues(list_size)
-
-    for(field,expected_value) in pairs(filter)
-        mask=get(masks,(field,expected_value),nothing)
-        mask===nothing&&return falses(list_size)
-        matches.&=mask
-    end
-
-    return matches
+    return _evaluate_list_filter(index,list_index,normalize_filter(filter))
 end
 
-function estimate_list_filter_count(index::FilterAwareIVFIndex,list_index::Int,filter::NamedTuple,)
-    if length(filter)==1
-        field,expected_value=first(pairs(filter))
-        return get(index.metadata_counts[list_index],(field,expected_value),0)
-    end
-
+function estimate_list_filter_count(index::FilterAwareIVFIndex,list_index::Int,filter::Union{NamedTuple,FilterExpr},)
     return count(evaluate_list_filter(index,list_index,filter))
 end
 
-function filtered_list_candidates(index::FilterAwareIVFIndex,list_index::Int,filter::NamedTuple,)
+function filtered_list_candidates(index::FilterAwareIVFIndex,list_index::Int,filter::Union{NamedTuple,FilterExpr},)
     1<=list_index<=length(index.ivf.lists)||throw(BoundsError(index.ivf.lists,list_index))
-
-    if length(filter)==1
-        field,expected_value=first(pairs(filter))
-        return get(index.metadata_postings[list_index],(field,expected_value),Int[])
-    end
-
-    mask=evaluate_list_filter(index,list_index,filter)
+    mask=_evaluate_list_filter(index,list_index,normalize_filter(filter))
     list=index.ivf.lists[list_index]
     return Int[list[position] for position in eachindex(mask) if mask[position]]
 end
 
-function collect_filtered_list_candidates(index::FilterAwareIVFIndex,selected_lists::AbstractVector{<:Integer},filter::NamedTuple,)
+function collect_filtered_list_candidates(index::FilterAwareIVFIndex,selected_lists::AbstractVector{<:Integer},filter::Union{NamedTuple,FilterExpr},)
+    normalized=normalize_filter(filter)
     candidate_indices=Int[]
-    sizehint!(candidate_indices,sum(estimate_list_filter_count(index,list_index,filter) for list_index in selected_lists))
 
     for list_index in selected_lists
-        append!(candidate_indices,filtered_list_candidates(index,list_index,filter))
+        1<=list_index<=length(index.ivf.lists)||throw(BoundsError(index.ivf.lists,list_index))
+        mask=_evaluate_list_filter(index,list_index,normalized)
+        list=index.ivf.lists[list_index]
+        append!(candidate_indices,(list[position] for position in eachindex(mask) if mask[position]))
     end
 
     return candidate_indices
 end
 
-function search_ivf_prefilter(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::NamedTuple,excluded::Union{Nothing,BitVector}=nothing,)
+function search_ivf_prefilter(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::Union{NamedTuple,FilterExpr},excluded::Union{Nothing,BitVector}=nothing,)
     validate_ivf_search(index.ivf,vectors,metadata,query)
     selected_lists=rank_ivf_lists(index.ivf,query;nprobe=nprobe,)
     candidate_indices=collect_filtered_list_candidates(index,selected_lists,filter)
@@ -131,7 +102,7 @@ function normalized_scores(values::AbstractVector{<:Real})
     return[(Float64(value)-minimum_value)/scale for value in values]
 end
 
-function rank_filter_aware_lists(index::FilterAwareIVFIndex,query::AbstractVector,filter::NamedTuple;nprobe::Int,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)::Vector{Int}
+function rank_filter_aware_lists(index::FilterAwareIVFIndex,query::AbstractVector,filter::Union{NamedTuple,FilterExpr};nprobe::Int,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)::Vector{Int}
     dim,list_count=size(index.ivf.centroids)
 
     length(query)==dim||throw(DimensionMismatch("query dim doesnt match centroids"))
@@ -163,7 +134,7 @@ function rank_filter_aware_lists(index::FilterAwareIVFIndex,query::AbstractVecto
     return candidate_pool[order[1:nprobe]]
 end
 
-function select_filter_aware_lists(index::FilterAwareIVFIndex,query::AbstractVector,filter::NamedTuple;k::Int,nprobe::Int,adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)
+function select_filter_aware_lists(index::FilterAwareIVFIndex,query::AbstractVector,filter::Union{NamedTuple,FilterExpr};k::Int,nprobe::Int,adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)
     k>0||throw(ArgumentError("k must be positive"))
     nprobe>0||throw(ArgumentError("nprobe must be positive"))
     candidate_multiplier>0||throw(ArgumentError("candidate multiplier must be positive"))
@@ -196,7 +167,7 @@ function select_filter_aware_lists(index::FilterAwareIVFIndex,query::AbstractVec
     return selected_lists
 end
 
-function select_filter_aware_candidates(index::FilterAwareIVFIndex,metadata::AbstractVector,query::AbstractVector,filter::NamedTuple;k::Int,nprobe::Int,adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)
+function select_filter_aware_candidates(index::FilterAwareIVFIndex,metadata::AbstractVector,query::AbstractVector,filter::Union{NamedTuple,FilterExpr};k::Int,nprobe::Int,adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,)
     vector_count=sum(length,index.ivf.lists)
     length(metadata)==vector_count||throw(DimensionMismatch("metadata count doesnt match index"))
 
@@ -222,7 +193,7 @@ function select_filter_aware_candidates(index::FilterAwareIVFIndex,metadata::Abs
     )
 end
 
-function search_filter_aware_ivf(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::NamedTuple,adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,excluded::Union{Nothing,BitVector}=nothing,)
+function search_filter_aware_ivf(index::FilterAwareIVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::Union{NamedTuple,FilterExpr},adaptive::Bool=false,max_nprobe::Int=nprobe,candidate_multiplier::Float64=4.0,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,excluded::Union{Nothing,BitVector}=nothing,)
     validate_ivf_search(index.ivf,vectors,metadata,query)
 
     selection=select_filter_aware_candidates(

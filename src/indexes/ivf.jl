@@ -494,14 +494,19 @@ function collect_ivf_candidates(index::IVFIndex,selected_lists::AbstractVector{<
     return candidate_indices
 end
 
-function filter_ivf_candidates(candidate_indices::AbstractVector{<:Integer},metadata::AbstractVector,filter::NamedTuple;filter_index::Union{Nothing,BitsetIndex}=nothing,)
-    if filter_index===nothing
+function _filter_ivf_candidates(candidate_indices::AbstractVector{<:Integer},metadata::AbstractVector,filter::FilterExpr;filter_index::Union{Nothing,BitsetIndex}=nothing,)
+    filter_index===nothing||filter_index.count==length(metadata)||throw(DimensionMismatch("filter index count doesnt match metadata"))
+
+    if filter_index===nothing||!supports_indexed_filter(filter_index,filter)
         return Int[index for index in candidate_indices if matches_filter(metadata[index],filter)]
     end
 
-    filter_index.count==length(metadata)||throw(DimensionMismatch("filter index count doesnt match metadata"))
     mask=evaluate_filter(filter_index,filter)
     return Int[index for index in candidate_indices if mask[index]]
+end
+
+function filter_ivf_candidates(candidate_indices::AbstractVector{<:Integer},metadata::AbstractVector,filter::Union{NamedTuple,FilterExpr};filter_index::Union{Nothing,BitsetIndex}=nothing,)
+    return _filter_ivf_candidates(candidate_indices,metadata,normalize_filter(filter);filter_index=filter_index,)
 end
 
 function score_ivf_candidates(vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector,candidate_indices::AbstractVector{<:Integer};k::Int,metric::Symbol,vector_norms::Union{Nothing,AbstractVector}=nothing,excluded::Union{Nothing,BitVector}=nothing,)
@@ -563,11 +568,12 @@ function search_ivf(index::IVFIndex,vectors::AbstractMatrix,metadata::AbstractVe
     return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=index.vector_norms,excluded=excluded,)
 end
 
-function search_ivf_prefilter(index::IVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::NamedTuple,filter_index::Union{Nothing,BitsetIndex}=nothing,excluded::Union{Nothing,BitVector}=nothing,)
+function search_ivf_prefilter(index::IVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::Union{NamedTuple,FilterExpr},filter_index::Union{Nothing,BitsetIndex}=nothing,excluded::Union{Nothing,BitVector}=nothing,)
     validate_ivf_search(index,vectors,metadata,query)
+    normalized_filter=normalize_filter(filter)
     selected_lists=rank_ivf_lists(index,query;nprobe=nprobe,)
     visited_indices=collect_ivf_candidates(index,selected_lists)
-    candidate_indices=filter_ivf_candidates(visited_indices,metadata,filter;filter_index=filter_index,)
+    candidate_indices=_filter_ivf_candidates(visited_indices,metadata,normalized_filter;filter_index=filter_index,)
 
     return score_ivf_candidates(vectors,metadata,query,candidate_indices;k=k,metric=metric,vector_norms=index.vector_norms,excluded=excluded,)
 end
@@ -581,11 +587,12 @@ function resolve_postfilter_oversample(minimum_oversample::Int,selectivity::Floa
     return max(minimum_oversample,ceil(Int,candidate_multiplier/selectivity))
 end
 
-function search_ivf_postfilter(index::IVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::NamedTuple,oversample::Int=10,excluded::Union{Nothing,BitVector}=nothing,)
+function search_ivf_postfilter(index::IVFIndex,vectors::AbstractMatrix,metadata::AbstractVector,query::AbstractVector;k::Int=10,nprobe::Int=1,metric::Symbol=:cosine,filter::Union{NamedTuple,FilterExpr},oversample::Int=10,excluded::Union{Nothing,BitVector}=nothing,)
     oversample>0||throw(ArgumentError("oversample must be positive"))
+    normalized_filter=normalize_filter(filter)
 
     results=search_ivf(index,vectors,metadata,query;k=k*oversample,nprobe=nprobe,metric=metric,excluded=excluded,)
-    filtered_results=[result for result in results if matches_filter(result.metadata,filter)]
+    filtered_results=[result for result in results if matches_filter(result.metadata,normalized_filter)]
 
     return filtered_results[1:min(k,length(filtered_results))]
 end

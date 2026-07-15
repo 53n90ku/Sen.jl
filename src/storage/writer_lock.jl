@@ -53,6 +53,7 @@ function release_database_writer_lock_finalizer!(db::VectorDB)
     io=db.writer_lock
     db.writer_lock=nothing
     db.closed=true
+    release_vector_store_mapping!(db.vector_store)
 
     if io!==nothing
         try
@@ -111,6 +112,7 @@ function Base.close(db::VectorDB)
         io=db.writer_lock
         db.writer_lock=nothing
         db.closed=true
+        release_vector_store_mapping!(db.vector_store)
         io===nothing||release_database_writer_lock(io)
         return nothing
     end

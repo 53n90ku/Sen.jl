@@ -24,6 +24,7 @@ using Sen: search_filter_aware_bound_with_stats,search_filter_aware_ivf,search_i
 using Sen: search_ivf_postfilter,search_ivf_prefilter,select_filter_aware_candidates
 using Sen: lookup_calibrated_nprobe,stored_vectors,strategy_name,vector_norm
 using Sen: load_ivf_index,save_ivf_index
+using Sen: is_mapped,load_vector_store,release_vector_store_mapping!
 
 include("datasets.jl")
 include("dataset_manifest.jl")
@@ -35,6 +36,7 @@ include("index_diagnostics.jl")
 include("ivf_sweep.jl")
 include("metrics.jl")
 include("batch_search.jl")
+include("vector_loading.jl")
 include("runner.jl")
 include("selectivity_sweep.jl")
 include("sweeps.jl")
@@ -70,6 +72,7 @@ export evaluate_hybrid_validation,save_hybrid_validation
 export bootstrap_recall_interval
 export recall_at_k,latency_summary,measure_latency
 export batch_queries_per_second,run_batch_search_benchmark
+export run_vector_load_benchmark
 export count_exact_candidates,count_ivf_candidates,count_ivf_prefilter_work
 export count_filter_aware_candidates,count_filter_aware_work
 export BenchmarkContext,build_benchmark_context,benchmark_summary,run_benchmark

@@ -781,11 +781,11 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
     end
 end
 
-function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
+function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),mmap_vectors::Union{Bool,Symbol}=:auto,mmap_threshold_bytes::Int=DEFAULT_VECTOR_MMAP_THRESHOLD_BYTES,)
     descriptor=validate_database_snapshot(snapshot_path)
     manifest=load_manifest(snapshot_path)
     descriptor.revision===nothing||descriptor.revision==manifest.revision||throw(ArgumentError("snapshot revision doesnt match manifest"))
-    vector_store=load_vector_store(snapshot_path)
+    vector_store=load_vector_store(snapshot_path;mmap=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
     metadata_store=load_metadata_store(snapshot_path)
     id_store=load_id_store(snapshot_path)
 
@@ -864,7 +864,7 @@ function load_db_from_wal(path::AbstractString;checkpoint_operations::Int=10_000
     return db
 end
 
-function load_db_without_writer_lock(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
+function load_db_without_writer_lock(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),mmap_vectors::Union{Bool,Symbol}=:auto,mmap_threshold_bytes::Int=DEFAULT_VECTOR_MMAP_THRESHOLD_BYTES,)
     if isfile(database_wal_path(path))&&!isfile(database_current_path(path))&&!isfile(joinpath(path,"manifest.toml"))&&isempty(database_snapshot_generations(path))
         return load_db_from_wal(path;checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
     end
@@ -877,19 +877,19 @@ function load_db_without_writer_lock(path::AbstractString;iterations::Int=20,see
     end
 
     try
-        return load_db_from_snapshot(path,snapshot_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
+        return load_db_from_snapshot(path,snapshot_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
     catch
         recover||rethrow()
         recovered_path=recover_database_snapshot(path)
-        return load_db_from_snapshot(path,recovered_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
+        return load_db_from_snapshot(path,recovered_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
     end
 end
 
-function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
+function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,recover::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),mmap_vectors::Union{Bool,Symbol}=:auto,mmap_threshold_bytes::Int=DEFAULT_VECTOR_MMAP_THRESHOLD_BYTES,)
     io=acquire_database_writer_lock(path)
 
     try
-        db=load_db_without_writer_lock(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=recover,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
+        db=load_db_without_writer_lock(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=recover,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
         attach_database_writer_lock!(db,io)
         maybe_schedule_database_maintenance!(db)
         return db
@@ -899,6 +899,6 @@ function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::B
     end
 end
 
-function recover_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),)
-    return load_db(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=true,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
+function recover_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),mmap_vectors::Union{Bool,Symbol}=:auto,mmap_threshold_bytes::Int=DEFAULT_VECTOR_MMAP_THRESHOLD_BYTES,)
+    return load_db(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=true,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
 end

@@ -9,6 +9,24 @@ using Sen
     @test_throws DimensionMismatch squared_distance(a,Float32[1])
 end
 
+@testset "dot product IVF routing" begin
+    centroids=Float32[10 1;0 1]
+    index=IVFIndex(
+        centroids,
+        [Int[],Int[]],
+        Float32[],
+        :dot,
+        fill(Float32(pi),2),
+        fill(-1.0f0,2),
+        zeros(Float32,2),
+    )
+    query=Float32[1,1]
+
+    @test Sen.centroid_distances(index,query)==Float32[-10,-2]
+    @test nearest_centroid(centroids,query;metric=:dot,)==1
+    @test rank_ivf_lists(index,query;nprobe=1,)==[1]
+end
+
 @testset "ivf postfilter oversampling" begin
     vectors=Float32[
         1.0 0.9 0.8 0.7

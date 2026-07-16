@@ -1,5 +1,5 @@
 const IVF_INDEX_MAGIC=UInt8[0x53,0x45,0x4e,0x49,0x44,0x58,0x30,0x31]
-const IVF_INDEX_VERSION=1
+const IVF_INDEX_VERSION=2
 
 function index_file_path(path::AbstractString,filename::AbstractString="index.bin")
     isempty(filename)&&throw(ArgumentError("index filename cannot be empty"))
@@ -13,6 +13,9 @@ function save_ivf_index(path::AbstractString,index::IVFIndex;filename::AbstractS
     dim,list_count=size(index.centroids)
     vector_count=sum(length,index.lists)
     index.metric in (:cosine,:dot)||throw(ArgumentError("index metric must be cosine or dot"))
+    index.routing in (:cosine,:dot,:euclidean)||throw(ArgumentError("index routing must be cosine, dot or euclidean"))
+    index.metric===:cosine&&index.routing!==:cosine&&throw(ArgumentError("cosine index must use cosine routing"))
+    index.metric===:dot&&!(index.routing in (:dot,:euclidean))&&throw(ArgumentError("dot index routing is invalid"))
     length(index.vector_norms)==vector_count||throw(DimensionMismatch("vector norm count doesnt match index"))
     length(index.list_radii)==list_count||throw(DimensionMismatch("radius count doesnt match index"))
 
@@ -20,6 +23,7 @@ function save_ivf_index(path::AbstractString,index::IVFIndex;filename::AbstractS
         write(io,IVF_INDEX_MAGIC)
         write(io,Int64(IVF_INDEX_VERSION))
         write(io,index.metric===:cosine ? UInt8(1) : UInt8(2))
+        write(io,index.routing===:cosine ? UInt8(1) : index.routing===:dot ? UInt8(2) : UInt8(3))
         write(io,Int64(dim))
         write(io,Int64(list_count))
         write(io,Int64(vector_count))
@@ -49,9 +53,17 @@ function load_ivf_index(path::AbstractString;filename::AbstractString="index.bin
         magic==IVF_INDEX_MAGIC||throw(ArgumentError("invalid index file"))
 
         version=Int(read(io,Int64))
-        version==IVF_INDEX_VERSION||throw(ArgumentError("unsupported index format version"))
+        version in (1,IVF_INDEX_VERSION)||throw(ArgumentError("unsupported index format version"))
         metric_code=read(io,UInt8)
         metric=metric_code==1 ? :cosine : metric_code==2 ? :dot : throw(ArgumentError("invalid stored index metric"))
+        routing=if version>=2
+            routing_code=read(io,UInt8)
+            routing_code==1 ? :cosine : routing_code==2 ? :dot : routing_code==3 ? :euclidean : throw(ArgumentError("invalid stored index routing"))
+        else
+            metric===:cosine ? :cosine : :euclidean
+        end
+        metric===:cosine&&routing!==:cosine&&throw(ArgumentError("stored cosine index routing is invalid"))
+        metric===:dot&&!(routing in (:dot,:euclidean))&&throw(ArgumentError("stored dot index routing is invalid"))
         dim=Int(read(io,Int64))
         list_count=Int(read(io,Int64))
         vector_count=Int(read(io,Int64))
@@ -93,7 +105,7 @@ function load_ivf_index(path::AbstractString;filename::AbstractString="index.bin
         all(seen)||throw(ArgumentError("stored index does not contain every vector"))
         eof(io)||throw(ArgumentError("index file contains unexpected data"))
 
-        return IVFIndex(centroids,lists,vector_norms,metric,list_radii,cos.(list_radii),sin.(list_radii))
+        return IVFIndex(centroids,lists,vector_norms,metric,routing,list_radii,cos.(list_radii),sin.(list_radii))
     end
 end
 

@@ -185,6 +185,7 @@ function record_database_mutation!(db::VectorDB,revision::UInt64,body::Vector{UI
     end
 
     push!(db.mutation_history,DatabaseMutationEntry(revision,copy(body)))
+    prune_database_mutation_history!(db)
     return db
 end
 

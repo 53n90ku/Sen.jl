@@ -140,6 +140,29 @@ function active_segment_work(segment::ActiveSegment)
     return length(segment.store)+length(segment.tombstone_ids)
 end
 
+function segment_topology_visible_ids(segments::Vector{ImmutableSegment},active::ActiveSegment)
+    seen=Set{Any}(active.tombstone_ids)
+    visible=Set{Any}()
+
+    for id in active.store.id_store.ids
+        id in seen&&continue
+        push!(seen,id)
+        push!(visible,id)
+    end
+
+    for segment in Iterators.reverse(segments)
+        union!(seen,segment.tombstone_ids)
+
+        for(position,id) in enumerate(segment.id_store.ids)
+            id in seen&&continue
+            push!(seen,id)
+            segment.excluded[position]||push!(visible,id)
+        end
+    end
+
+    return visible
+end
+
 function mark_active_segment_revision!(segment::ActiveSegment,revision::UInt64)
     if active_segment_is_empty(segment)&&segment.revision_start>segment.revision_end
         segment.revision_start=revision

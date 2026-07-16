@@ -113,6 +113,59 @@ function validate_database(db::VectorDB)
     return db
 end
 
+function register_database_index_build!(db::VectorDB)
+    state=db.index_build_state
+    lock(state.lock)
+
+    try
+        push!(state.revisions,db.revision)
+        return db.revision
+    finally
+        unlock(state.lock)
+    end
+end
+
+function prune_database_mutation_history_locked!(db::VectorDB)
+    state=db.index_build_state
+    retention_revision=isempty(state.revisions) ? db.revision : minimum(state.revisions)
+    first_retained=findfirst(entry->entry.revision>retention_revision,db.mutation_history)
+
+    if first_retained===nothing
+        empty!(db.mutation_history)
+    elseif first_retained>1
+        deleteat!(db.mutation_history,1:(first_retained-1))
+    end
+
+    return db
+end
+
+function prune_database_mutation_history!(db::VectorDB)
+    state=db.index_build_state
+    lock(state.lock)
+
+    try
+        return prune_database_mutation_history_locked!(db)
+    finally
+        unlock(state.lock)
+    end
+end
+
+function unregister_database_index_build!(db::VectorDB,revision::UInt64)
+    return with_database_write(db.database_lock) do
+        state=db.index_build_state
+        lock(state.lock)
+
+        try
+            position=findfirst(==(revision),state.revisions)
+            position===nothing||deleteat!(state.revisions,position)
+            prune_database_mutation_history_locked!(db)
+            return db
+        finally
+            unlock(state.lock)
+        end
+    end
+end
+
 function next_database_revision(db::VectorDB)
     db.revision==typemax(UInt64)&&error("database revision overflow")
     return db.revision+UInt64(1)
@@ -209,28 +262,7 @@ function synchronize_active_segment!(db::VectorDB)
 end
 
 function database_visible_ids(db::VectorDB)
-    seen=Set{Any}()
-    visible=Set{Any}()
-
-    union!(seen,db.active_segment.tombstone_ids)
-
-    for id in db.delta_store.id_store.ids
-        id in seen&&continue
-        push!(seen,id)
-        push!(visible,id)
-    end
-
-    for segment in Iterators.reverse(db.immutable_segments)
-        union!(seen,segment.tombstone_ids)
-
-        for(position,id) in enumerate(segment.id_store.ids)
-            id in seen&&continue
-            push!(seen,id)
-            segment.excluded[position]||push!(visible,id)
-        end
-    end
-
-    return visible
+    return segment_topology_visible_ids(db.immutable_segments,db.active_segment)
 end
 
 function database_segment_exclusions(db::VectorDB)
@@ -478,7 +510,8 @@ function install_database_mutation_state!(db::VectorDB,state)
     return db
 end
 
-function recover_committed_database_mutation!(db::VectorDB)
+function recover_committed_database_mutation!(db::VectorDB,revision::UInt64,wal_body::Vector{UInt8})
+    retained_history=copy(db.mutation_history)
     recovered=load_db_without_writer_lock(
         db.path;
         rebuild=false,
@@ -489,7 +522,28 @@ function recover_committed_database_mutation!(db::VectorDB)
         maintenance_config=db.maintenance_config,
         mmap_vectors=false,
     )
-    return install_database_mutation_state!(db,database_mutation_state(recovered))
+    install_database_mutation_state!(db,database_mutation_state(recovered))
+    state=db.index_build_state
+    lock(state.lock)
+
+    try
+        if !isempty(state.revisions)
+            retention_revision=minimum(state.revisions)
+            history=DatabaseMutationEntry[entry for entry in retained_history if entry.revision>retention_revision]
+
+            if revision>retention_revision&&!any(entry->entry.revision==revision,history)
+                push!(history,DatabaseMutationEntry(revision,copy(wal_body)))
+            end
+
+            sort!(history;by=entry->entry.revision,)
+            db.mutation_history=history
+        end
+    finally
+        unlock(state.lock)
+    end
+
+    validate_database(db)
+    return db
 end
 
 function commit_database_mutation!(apply::Function,db::VectorDB,revision::UInt64,wal_body::Vector{UInt8})
@@ -506,7 +560,7 @@ function commit_database_mutation!(apply::Function,db::VectorDB,revision::UInt64
         return result
     catch error
         if durable
-            recover_committed_database_mutation!(db)
+            recover_committed_database_mutation!(db,revision,wal_body)
             throw(DatabaseMutationCommittedError(revision,error))
         elseif backup!==nothing
             install_database_mutation_state!(db,backup)
@@ -857,26 +911,33 @@ function materialize_database(db::VectorDB)
 end
 
 function build!(db::VectorDB;nlists::Int,iterations::Int=20,seed::Int=42,restarts::Int=1,training_count::Union{Nothing,Int}=nothing,_snapshot_hook::Union{Nothing,Function}=nothing,)
-    snapshot=with_database_read(db.database_lock) do
-        validate_database_fast(db)
-        count=logical_length(db)
-        count>0||throw(ArgumentError("database cannot be empty"))
-        resolved_training_count=training_count===nothing ? count : training_count
-        config=IndexBuildConfig(nlists,count;iterations=iterations,seed=seed,restarts=restarts,training_count=resolved_training_count,)
-        stores=materialize_database(db)
-        return(revision=db.revision,config=config,stores=stores,metric=db.metric,)
+    build_revision=nothing
+
+    try
+        snapshot=with_database_read(db.database_lock) do
+            validate_database_fast(db)
+            count=logical_length(db)
+            count>0||throw(ArgumentError("database cannot be empty"))
+            resolved_training_count=training_count===nothing ? count : training_count
+            config=IndexBuildConfig(nlists,count;iterations=iterations,seed=seed,restarts=restarts,training_count=resolved_training_count,)
+            build_revision=register_database_index_build!(db)
+            stores=materialize_database(db)
+            return(revision=build_revision,config=config,stores=stores,metric=db.metric,)
+        end
+
+        _snapshot_hook===nothing||_snapshot_hook(snapshot)
+
+        vectors=stored_vectors(snapshot.stores.vector_store)
+        metadata=stored_metadata(snapshot.stores.metadata_store)
+        index=build_filter_aware_ivf(vectors,metadata;nlists=snapshot.config.nlists,iterations=snapshot.config.iterations,seed=snapshot.config.seed,metric=snapshot.metric,restarts=snapshot.config.restarts,training_count=snapshot.config.training_count,)
+        filter_index=build_bitset_index(metadata)
+        index_bytes=database_index_bytes(index,filter_index)
+        built=(revision=snapshot.revision,config=snapshot.config,stores=snapshot.stores,index=index,filter_index=filter_index,index_bytes=index_bytes,)
+
+        return install_database_index!(db,built)
+    finally
+        build_revision===nothing||unregister_database_index_build!(db,build_revision)
     end
-
-    _snapshot_hook===nothing||_snapshot_hook(snapshot)
-
-    vectors=stored_vectors(snapshot.stores.vector_store)
-    metadata=stored_metadata(snapshot.stores.metadata_store)
-    index=build_filter_aware_ivf(vectors,metadata;nlists=snapshot.config.nlists,iterations=snapshot.config.iterations,seed=snapshot.config.seed,metric=snapshot.metric,restarts=snapshot.config.restarts,training_count=snapshot.config.training_count,)
-    filter_index=build_bitset_index(metadata)
-    index_bytes=database_index_bytes(index,filter_index)
-    built=(revision=snapshot.revision,config=snapshot.config,stores=snapshot.stores,index=index,filter_index=filter_index,index_bytes=index_bytes,)
-
-    return install_database_index!(db,built)
 end
 
 function database_mutation_tail(db::VectorDB,revision::UInt64)
@@ -970,6 +1031,11 @@ function rebuild!(db::VectorDB)
     config.nlists<=count||throw(ArgumentError("database has fewer vectors than its configured list count"))
     training_count=min(count,max(config.nlists,config.training_count))
     return build!(db;nlists=config.nlists,iterations=config.iterations,seed=config.seed,restarts=config.restarts,training_count=training_count,)
+end
+
+"""Compact all immutable and active segments into a freshly indexed base generation."""
+function compact!(db::VectorDB)
+    return rebuild!(db)
 end
 
 function database_search_results(raw_results::AbstractVector,id_store::IDStore;index_offset::Int=0,)
@@ -1277,19 +1343,20 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
         validate_database(db)
         retain_snapshots>0||throw(ArgumentError("retain snapshots must be positive"))
         config=db.build_config
+        segmented=db.segment_mode
         current_index=has_usable_base(db)&&db.index_revision==db.revision
-        stores=current_index ? (vector_store=db.vector_store,metadata_store=db.metadata_store,id_store=db.id_store,) : materialize_database(db)
-        count=length(stores.vector_store)
+        stores=segmented ? nothing : (current_index ? (vector_store=db.vector_store,metadata_store=db.metadata_store,id_store=db.id_store,) : materialize_database(db))
+        count=segmented ? logical_length(db) : length(stores.vector_store)
         persisted_nlists=config===nothing||count==0 ? nothing : min(config.nlists,count)
         persisted_training_count=persisted_nlists===nothing ? count : min(count,max(persisted_nlists,config.training_count))
         manifest=create_database_manifest(
             db.dim,
             db.metric,
             count;
-            format_version=2,
+            format_version=segmented ? 3 : 2,
             nlists=persisted_nlists,
             revision=db.revision,
-            index_revision=current_index ? db.index_revision : nothing,
+            index_revision=segmented ? db.index_revision : (current_index ? db.index_revision : nothing),
             iterations=config===nothing ? 20 : config.iterations,
             seed=config===nothing ? 42 : config.seed,
             restarts=config===nothing ? 1 : config.restarts,
@@ -1299,11 +1366,16 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
 
         try
             save_manifest(snapshot.temporary_path,manifest)
-            save_vector_store(snapshot.temporary_path,stores.vector_store)
-            save_metadata_store(snapshot.temporary_path,stores.metadata_store)
-            save_id_store(snapshot.temporary_path,stores.id_store)
-            current_index&&save_ivf_index(snapshot.temporary_path,db.index.ivf)
-            save_database_segments(snapshot.temporary_path,db)
+
+            if segmented
+                save_database_segments(snapshot.temporary_path,db)
+            else
+                save_vector_store(snapshot.temporary_path,stores.vector_store)
+                save_metadata_store(snapshot.temporary_path,stores.metadata_store)
+                save_id_store(snapshot.temporary_path,stores.id_store)
+                current_index&&save_ivf_index(snapshot.temporary_path,db.index.ivf)
+            end
+
             seal_database_snapshot(snapshot.temporary_path,db.revision)
             maybe_pause_database_process!(:after_snapshot_seal,db.path)
             commit_database_snapshot(db.path,snapshot)
@@ -1319,7 +1391,7 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
     end
 end
 
-function install_loaded_database_segments!(db::VectorDB,topology)
+function install_loaded_database_segments!(db::VectorDB,topology;live_count::Int=db.live_count,)
     old_vector_store=db.vector_store
     db.immutable_segments=topology.immutable_segments
     primary=first(db.immutable_segments)
@@ -1335,6 +1407,7 @@ function install_loaded_database_segments!(db::VectorDB,topology)
     db.active_segment=topology.active_segment
     db.delta_store=db.active_segment.store
     db.segment_mode=true
+    db.live_count=live_count
     db.base_tombstones=first(database_segment_exclusions(db))
     old_vector_store===db.vector_store||release_vector_store_mapping!(old_vector_store)
     clear_plan_cache!(db)
@@ -1345,49 +1418,78 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
     descriptor=validate_database_snapshot(snapshot_path)
     manifest=load_manifest(snapshot_path)
     descriptor.revision===nothing||descriptor.revision==manifest.revision||throw(ArgumentError("snapshot revision doesnt match manifest"))
-    vector_store=load_vector_store(snapshot_path;mmap=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
-    metadata_store=load_metadata_store(snapshot_path)
-    id_store=load_id_store(snapshot_path)
-
-    vector_store.dim==manifest.dim||throw(DimensionMismatch("stored vector dimension doesnt match manifest"))
-    length(vector_store)==manifest.count||throw(DimensionMismatch("stored vector count doesnt match manifest"))
-    length(metadata_store)==manifest.count||throw(DimensionMismatch("stored metadata count doesnt match manifest"))
-    length(id_store)==manifest.count||throw(DimensionMismatch("stored id count doesnt match manifest"))
-    validate_stored_vectors!(stored_vectors(vector_store),manifest.metric)
-
-    db=VectorDB(
-        String(path),
-        manifest.dim,
-        manifest.metric,
-        vector_store,
-        metadata_store,
-        id_store,
-        nothing,
-        nothing,
-        manifest.build_config,
-        manifest.revision,
-        nothing,
-        DatabaseLock(),
-        Dict{Any,Any}(),
-        ReentrantLock();
-        checkpoint_operations=checkpoint_operations,
-        checkpoint_bytes=checkpoint_bytes,
-        checkpoint_retain_snapshots=checkpoint_retain_snapshots,
-        maintenance_config=maintenance_config,
-    )
-
     topology=load_database_segments(snapshot_path,manifest.dim,manifest.metric,manifest.revision;mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
 
-    if topology!==nothing
-        install_loaded_database_segments!(db,topology)
-    elseif manifest.index_revision==manifest.revision&&isfile(index_file_path(snapshot_path))
+    if manifest.format_version>=3
+        topology===nothing&&throw(ArgumentError("segment-native snapshot is missing its segment topology"))
+        topology.index_revision==manifest.index_revision||throw(ArgumentError("segment index revision doesnt match manifest"))
+    end
+
+    db=if topology===nothing
+        vector_store=load_vector_store(snapshot_path;mmap=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
+        metadata_store=load_metadata_store(snapshot_path)
+        id_store=load_id_store(snapshot_path)
+
+        vector_store.dim==manifest.dim||throw(DimensionMismatch("stored vector dimension doesnt match manifest"))
+        length(vector_store)==manifest.count||throw(DimensionMismatch("stored vector count doesnt match manifest"))
+        length(metadata_store)==manifest.count||throw(DimensionMismatch("stored metadata count doesnt match manifest"))
+        length(id_store)==manifest.count||throw(DimensionMismatch("stored id count doesnt match manifest"))
+        validate_stored_vectors!(stored_vectors(vector_store),manifest.metric)
+
+        VectorDB(
+            String(path),
+            manifest.dim,
+            manifest.metric,
+            vector_store,
+            metadata_store,
+            id_store,
+            nothing,
+            nothing,
+            manifest.build_config,
+            manifest.revision,
+            nothing,
+            DatabaseLock(),
+            Dict{Any,Any}(),
+            ReentrantLock();
+            checkpoint_operations=checkpoint_operations,
+            checkpoint_bytes=checkpoint_bytes,
+            checkpoint_retain_snapshots=checkpoint_retain_snapshots,
+            maintenance_config=maintenance_config,
+        )
+    else
+        length(segment_topology_visible_ids(topology.immutable_segments,topology.active_segment))==manifest.count||throw(DimensionMismatch("stored segment topology count doesnt match manifest"))
+        primary=first(topology.immutable_segments)
+        database=VectorDB(
+            String(path),
+            manifest.dim,
+            manifest.metric,
+            primary.vector_store,
+            primary.metadata_store,
+            primary.id_store,
+            primary.index,
+            primary.index===nothing ? nothing : primary.filter_index,
+            primary.build_config,
+            manifest.revision,
+            topology.index_revision,
+            DatabaseLock(),
+            Dict{Any,Any}(),
+            ReentrantLock();
+            checkpoint_operations=checkpoint_operations,
+            checkpoint_bytes=checkpoint_bytes,
+            checkpoint_retain_snapshots=checkpoint_retain_snapshots,
+            maintenance_config=maintenance_config,
+        )
+        install_loaded_database_segments!(database,topology;live_count=manifest.count,)
+    end
+
+    if topology===nothing&&manifest.index_revision==manifest.revision&&isfile(index_file_path(snapshot_path))
         ivf=load_ivf_index(snapshot_path)
         size(ivf.centroids,1)==manifest.dim||throw(DimensionMismatch("stored index dimension doesnt match manifest"))
         manifest.nlists===nothing||length(ivf.lists)==manifest.nlists||throw(DimensionMismatch("stored list count doesnt match manifest"))
         sum(length,ivf.lists)==manifest.count||throw(DimensionMismatch("stored index count doesnt match manifest"))
         ivf.metric===manifest.metric||throw(ArgumentError("stored index metric doesnt match manifest"))
-        db.index=build_filter_aware_ivf(ivf,stored_metadata(metadata_store))
-        db.filter_index=build_bitset_index(stored_metadata(metadata_store))
+        db.index=build_filter_aware_ivf(ivf,stored_metadata(db.metadata_store))
+        db.filter_index=build_bitset_index(stored_metadata(db.metadata_store))
         db.index_revision=manifest.index_revision
         db.index_bytes=database_index_bytes(db.index,db.filter_index)
     end

@@ -40,7 +40,7 @@ export VectorDB,SearchResult,PlannerConfig,DatabaseInfo,database_info
 export MaintenanceConfig,configure_maintenance!,maintenance_status,wait_for_maintenance
 export FilterExpr,Eq,In,Range,And,Or,Not
 export create_db,insert!,upsert!,update!,delete!,get_record
-export build!,rebuild!,is_built,is_dirty
+export build!,rebuild!,compact!,is_built,is_dirty
 export search,plan_query
 export save!,load_db,recover_db
 export STABLE_API_V1,stable_api

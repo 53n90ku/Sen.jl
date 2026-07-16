@@ -19,6 +19,7 @@ const STABLE_API_V1=(
     :get_record,
     :build!,
     :rebuild!,
+    :compact!,
     :is_built,
     :is_dirty,
     :database_info,

@@ -198,6 +198,9 @@ end
         snapshot_path=Sen.current_database_snapshot(path)
 
         @test isfile(Sen.database_segment_manifest_path(snapshot_path))
+        @test !isfile(joinpath(snapshot_path,"vectors.bin"))
+        @test !isfile(joinpath(snapshot_path,"metadata.bin"))
+        @test !isfile(joinpath(snapshot_path,"ids.bin"))
 
         upsert!(db,Float32[0.95,0,0],(version=2,);id="a",)
         delete!(db,"b")

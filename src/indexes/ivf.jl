@@ -6,13 +6,15 @@ struct IVFIndex
     lists::Vector{Vector{Int}}
     vector_norms::Vector{Float32}
     metric::Symbol
+    routing::Symbol
     list_radii::Vector{Float32}
     list_cos_radii::Vector{Float32}
     list_sin_radii::Vector{Float32}
 end
 
-IVFIndex(centroids::Matrix{Float32},lists::Vector{Vector{Int}})=IVFIndex(centroids,lists,Float32[],:cosine,fill(Float32(pi),length(lists)),fill(-1.0f0,length(lists)),zeros(Float32,length(lists)))
-IVFIndex(centroids::Matrix{Float32},lists::Vector{Vector{Int}},vector_norms::Vector{Float32})=IVFIndex(centroids,lists,vector_norms,:cosine,fill(Float32(pi),length(lists)),fill(-1.0f0,length(lists)),zeros(Float32,length(lists)))
+IVFIndex(centroids::Matrix{Float32},lists::Vector{Vector{Int}})=IVFIndex(centroids,lists,Float32[],:cosine,:cosine,fill(Float32(pi),length(lists)),fill(-1.0f0,length(lists)),zeros(Float32,length(lists)))
+IVFIndex(centroids::Matrix{Float32},lists::Vector{Vector{Int}},vector_norms::Vector{Float32})=IVFIndex(centroids,lists,vector_norms,:cosine,:cosine,fill(Float32(pi),length(lists)),fill(-1.0f0,length(lists)),zeros(Float32,length(lists)))
+IVFIndex(centroids::Matrix{Float32},lists::Vector{Vector{Int}},vector_norms::Vector{Float32},metric::Symbol,list_radii::Vector{Float32},list_cos_radii::Vector{Float32},list_sin_radii::Vector{Float32})=IVFIndex(centroids,lists,vector_norms,metric,metric,list_radii,list_cos_radii,list_sin_radii)
 
 function vector_norm(vector::AbstractVector)::Float32
     squared_norm=0.0f0
@@ -84,26 +86,23 @@ function normalize_vector!(vector::AbstractVector)
 end
 
 function centroid_score(centroids::AbstractMatrix,list_index::Int,vector::AbstractVector,metric::Symbol)
-    if metric===:cosine
+    if metric===:cosine||metric===:dot
         score=0.0f0
 
         @inbounds @simd for dimension in eachindex(vector)
             score+=Float32(vector[dimension])*centroids[dimension,list_index]
         end
 
-        vector_length=vector_norm(vector)
-        iszero(vector_length)&&throw(ArgumentError("vector cannot be zero"))
-        return score/vector_length
+        if metric===:cosine
+            vector_length=vector_norm(vector)
+            iszero(vector_length)&&throw(ArgumentError("vector cannot be zero"))
+            return score/vector_length
+        end
+
+        return score
     end
 
-    distance=0.0f0
-
-    @inbounds @simd for dimension in eachindex(vector)
-        difference=Float32(vector[dimension])-centroids[dimension,list_index]
-        distance+=difference*difference
-    end
-
-    return -distance
+    throw(ArgumentError("metric must be cosine or dot"))
 end
 
 function nearest_centroid_score(centroids::AbstractMatrix,vector::AbstractVector,metric::Symbol)
@@ -143,6 +142,17 @@ function initialize_centroids(vectors::AbstractMatrix,training_indices::Abstract
     dim=size(vectors,1)
     training_count=length(training_indices)
     centroids=Matrix{Float32}(undef,dim,nlists)
+
+    if metric===:dot
+        positions=randperm(rng,training_count)[1:nlists]
+
+        for list_index in 1:nlists
+            centroids[:,list_index].=vectors[:,training_indices[positions[list_index]]]
+        end
+
+        return centroids
+    end
+
     selected=falses(training_count)
     minimum_losses=fill(Inf32,training_count)
     selected_position=rand(rng,1:training_count)
@@ -162,7 +172,7 @@ function initialize_centroids(vectors::AbstractMatrix,training_indices::Abstract
 
             vector=@view vectors[:,training_indices[position]]
             score=centroid_score(centroids,list_index,vector,metric)
-            loss=metric===:cosine ? max(0.0f0,1.0f0-score) : -score
+            loss=max(0.0f0,1.0f0-score)
             minimum_losses[position]=min(minimum_losses[position],loss)
         end
 
@@ -403,7 +413,7 @@ function build_ivf(vectors::AbstractMatrix;nlists::Int,iterations::Int=20,seed::
     list_cos_radii=cos.(list_radii)
     list_sin_radii=sin.(list_radii)
 
-    return IVFIndex(centroids,lists,vector_norms,metric,list_radii,list_cos_radii,list_sin_radii)
+    return IVFIndex(centroids,lists,vector_norms,metric,metric,list_radii,list_cos_radii,list_sin_radii)
 end
 
 function centroid_distances!(distances::Vector{Float32},index::IVFIndex,query::AbstractVector)
@@ -411,11 +421,11 @@ function centroid_distances!(distances::Vector{Float32},index::IVFIndex,query::A
     length(query)==dim||throw(DimensionMismatch("query dimension doesnt match centroids"))
 
     resize!(distances,list_count)
-    query_norm=index.metric===:cosine ? vector_norm(query) : 1.0f0
-    index.metric===:cosine&&iszero(query_norm)&&throw(ArgumentError("query vector cannot be zero"))
+    query_norm=index.routing===:cosine ? vector_norm(query) : 1.0f0
+    index.routing===:cosine&&iszero(query_norm)&&throw(ArgumentError("query vector cannot be zero"))
 
     for list_index in 1:list_count
-        if index.metric===:cosine
+        if index.routing===:cosine
             similarity=0.0f0
 
             @inbounds @simd for dimension in 1:dim
@@ -423,7 +433,15 @@ function centroid_distances!(distances::Vector{Float32},index::IVFIndex,query::A
             end
 
             distances[list_index]=1.0f0-similarity/query_norm
-        else
+        elseif index.routing===:dot
+            score=0.0f0
+
+            @inbounds @simd for dimension in 1:dim
+                score+=Float32(query[dimension])*index.centroids[dimension,list_index]
+            end
+
+            distances[list_index]=-score
+        elseif index.routing===:euclidean
             distance=0.0f0
 
             @inbounds @simd for dimension in 1:dim
@@ -432,6 +450,8 @@ function centroid_distances!(distances::Vector{Float32},index::IVFIndex,query::A
             end
 
             distances[list_index]=distance
+        else
+            throw(ArgumentError("index routing must be cosine, dot or euclidean"))
         end
     end
 

@@ -37,7 +37,7 @@ function Base.getproperty(manifest::DatabaseManifest,name::Symbol)
 end
 
 function create_database_manifest(dim::Int,metric::Symbol,count::Int;format_version::Int=1,nlists::Union{Nothing,Int}=nothing,revision::Integer=count,index_revision::Union{Nothing,Integer}=nlists===nothing ? nothing : revision,iterations::Int=20,seed::Int=42,restarts::Int=1,training_count::Int=count,)
-    format_version in (1,2)||throw(ArgumentError("unsupported manifest format version"))
+    format_version in (1,2,3)||throw(ArgumentError("unsupported manifest format version"))
     dim>0||throw(ArgumentError("dimension must be positive"))
     metric in (:cosine,:dot)||throw(ArgumentError("metric must be cosine or dot"))
     count>=0||throw(ArgumentError("count cannot be negative"))

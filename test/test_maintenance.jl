@@ -23,10 +23,45 @@ using Sen
     @test_throws ArgumentError MaintenanceConfig(max_delta_search_records=0,)
     @test_throws ArgumentError MaintenanceConfig(active_segment_threshold=0,)
     @test_throws ArgumentError MaintenanceConfig(max_delta_search_records=2,active_segment_threshold=3,)
+    @test_throws ArgumentError MaintenanceConfig(segment_compaction_threshold=1,)
+    @test MaintenanceConfig(segment_compaction_threshold=0,).segment_compaction_threshold==0
     @test_throws ArgumentError MaintenanceConfig(tombstone_threshold=-1,)
     @test_throws ArgumentError MaintenanceConfig(tombstone_ratio=-0.1,)
     @test_throws ArgumentError MaintenanceConfig(max_retries=-1,)
     @test_throws ArgumentError MaintenanceConfig(retry_delay_ms=-1,)
+end
+
+@testset "committed mutation recovery preserves active build tail" begin
+    mktempdir() do path
+        config=MaintenanceConfig(enabled=false,max_delta_search_records=8,persist_after_rebuild=false,)
+        db=create_db(path;dim=2,maintenance_config=config,checkpoint_operations=0,checkpoint_bytes=0,)
+        insert!(db,Float32[1 0;0 1],[(name="right",),(name="up",)];ids=[1,2],)
+        build!(db;nlists=1,iterations=2,seed=72,)
+        save!(db)
+        snapshot_ready=Channel{UInt64}(1)
+        release_build=Channel{Nothing}(1)
+        builder=Threads.@spawn build!(db;nlists=1,iterations=2,seed=73,_snapshot_hook=snapshot->begin
+            put!(snapshot_ready,snapshot.revision)
+            take!(release_build)
+        end,)
+        build_revision=take!(snapshot_ready)
+
+        Sen.inject_database_mutation_fault!(:after_wal)
+        error=try
+            insert!(db,Float32[-1,0],(name="left",);id=3,)
+            nothing
+        catch caught
+            caught
+        end
+
+        @test error isa Sen.DatabaseMutationCommittedError
+        @test [entry.revision for entry in db.mutation_history]==[build_revision+1]
+        put!(release_build,nothing)
+        fetch(builder)
+        @test isempty(db.mutation_history)
+        @test get_record(db,3).metadata.name=="left"
+        close(db)
+    end
 end
 
 @testset "index generation rebases concurrent mutations" begin
@@ -46,6 +81,7 @@ end
     insert!(db,[0.7,0.7],(name="diagonal",);id="diagonal",)
     update!(db,"right";vector=[0.9,0.1],metadata=(name="right-new",),)
     delete!(db,"up")
+    @test [entry.revision for entry in db.mutation_history]==collect(build_revision+1:db.revision)
     put!(release_build,nothing)
     fetch(builder)
 
@@ -53,7 +89,7 @@ end
     @test db.revision==build_revision+3
     @test !is_built(db)
     @test Sen.delta_search_work(db)==2
-    @test [entry.revision for entry in db.mutation_history]==collect(build_revision+1:db.revision)
+    @test isempty(db.mutation_history)
     @test get_record(db,"right").metadata==(name="right-new",)
     @test get_record(db,"diagonal").metadata==(name="diagonal",)
     @test_throws KeyError get_record(db,"up")
@@ -62,6 +98,46 @@ end
     rebuild!(db)
     @test is_built(db)
     @test isempty(db.mutation_history)
+    close(db)
+end
+
+@testset "automatic segment compaction" begin
+    config=MaintenanceConfig(
+        minimum_changes=1_000,
+        delta_threshold=0,
+        delta_ratio=0.0,
+        max_delta_search_records=2,
+        active_segment_threshold=2,
+        segment_compaction_threshold=3,
+        incremental_indexing=false,
+        tombstone_threshold=0,
+        tombstone_ratio=0.0,
+        retry_delay_ms=1,
+        persist_after_rebuild=false,
+    )
+    db=create_db("automatic-segment-compaction";dim=2,metric=:dot,durable=false,maintenance_config=config,)
+    insert!(db,Float32[10 1;0 1],[(version=1,),(version=1,)];ids=[1,2],)
+    build!(db;nlists=2,iterations=2,seed=71,)
+
+    for id in 3:6
+        insert!(db,Float32[id,1],(version=id,);id=id,)
+    end
+
+    status=wait_for_maintenance(db;timeout=10.0,)
+    @test status.status==:completed
+    @test status.segment_count==1
+    @test length(db.immutable_segments)==1
+    @test Sen.active_segment_is_empty(db.active_segment)
+    @test isempty(db.mutation_history)
+    @test is_built(db)
+    @test [result.id for result in search(db,Float32[1,1];k=6,strategy=:exact,)]==[1,6,5,4,3,2]
+
+    insert!(db,Float32[0,2],(version=7,);id=7,)
+    compact!(db)
+    @test length(db.immutable_segments)==1
+    @test Sen.active_segment_is_empty(db.active_segment)
+    @test is_built(db)
+    @test get_record(db,7).metadata.version==7
     close(db)
 end
 

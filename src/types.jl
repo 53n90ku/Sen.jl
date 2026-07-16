@@ -5,6 +5,7 @@ struct MaintenanceConfig
     delta_ratio::Float64
     max_delta_search_records::Int
     active_segment_threshold::Int
+    segment_compaction_threshold::Int
     incremental_indexing::Bool
     tombstone_threshold::Int
     tombstone_ratio::Float64
@@ -13,19 +14,27 @@ struct MaintenanceConfig
     persist_after_rebuild::Bool
 end
 
-function MaintenanceConfig(;enabled::Bool=true,minimum_changes::Int=1_000,delta_threshold::Int=10_000,delta_ratio::Real=0.10,max_delta_search_records::Int=20_000,active_segment_threshold::Int=min(10_000,max_delta_search_records),incremental_indexing::Bool=true,tombstone_threshold::Int=10_000,tombstone_ratio::Real=0.10,max_retries::Int=3,retry_delay_ms::Int=50,persist_after_rebuild::Bool=true,)
+function MaintenanceConfig(;enabled::Bool=true,minimum_changes::Int=1_000,delta_threshold::Int=10_000,delta_ratio::Real=0.10,max_delta_search_records::Int=20_000,active_segment_threshold::Int=min(10_000,max_delta_search_records),segment_compaction_threshold::Int=8,incremental_indexing::Bool=true,tombstone_threshold::Int=10_000,tombstone_ratio::Real=0.10,max_retries::Int=3,retry_delay_ms::Int=50,persist_after_rebuild::Bool=true,)
     minimum_changes>0||throw(ArgumentError("minimum changes must be positive"))
     delta_threshold>=0||throw(ArgumentError("delta threshold cannot be negative"))
     0.0<=delta_ratio<=1.0||throw(ArgumentError("delta ratio must be between zero and one"))
     max_delta_search_records>0||throw(ArgumentError("max delta search records must be positive"))
     active_segment_threshold>0||throw(ArgumentError("active segment threshold must be positive"))
     active_segment_threshold<=max_delta_search_records||throw(ArgumentError("active segment threshold cannot exceed the delta search limit"))
+    segment_compaction_threshold==0||segment_compaction_threshold>=2||throw(ArgumentError("segment compaction threshold must be zero or at least two"))
     tombstone_threshold>=0||throw(ArgumentError("tombstone threshold cannot be negative"))
     0.0<=tombstone_ratio<=1.0||throw(ArgumentError("tombstone ratio must be between zero and one"))
     max_retries>=0||throw(ArgumentError("max retries cannot be negative"))
     retry_delay_ms>=0||throw(ArgumentError("retry delay cannot be negative"))
-    return MaintenanceConfig(enabled,minimum_changes,delta_threshold,Float64(delta_ratio),max_delta_search_records,active_segment_threshold,incremental_indexing,tombstone_threshold,Float64(tombstone_ratio),max_retries,retry_delay_ms,persist_after_rebuild)
+    return MaintenanceConfig(enabled,minimum_changes,delta_threshold,Float64(delta_ratio),max_delta_search_records,active_segment_threshold,segment_compaction_threshold,incremental_indexing,tombstone_threshold,Float64(tombstone_ratio),max_retries,retry_delay_ms,persist_after_rebuild)
 end
+
+mutable struct IndexBuildState
+    lock::ReentrantLock
+    revisions::Vector{UInt64}
+end
+
+IndexBuildState()=IndexBuildState(ReentrantLock(),UInt64[])
 
 mutable struct MaintenanceState
     lock::ReentrantLock
@@ -86,6 +95,7 @@ mutable struct VectorDB
     segment_mode::Bool
     live_count::Int
     mutation_history::Vector{DatabaseMutationEntry}
+    index_build_state::IndexBuildState
     wal_revision::Union{Nothing,UInt64}
     wal_checkpoint_revision::Union{Nothing,UInt64}
     checkpoint_operations::Int
@@ -118,7 +128,7 @@ function VectorDB(path::String,dim::Int,metric::Symbol,vector_store::VectorStore
     active_segment=create_active_segment(dim,revision)
     active_segment.store=delta_store
     segment_mode=index!==nothing
-    return VectorDB(path,dim,metric,vector_store,metadata_store,id_store,index,filter_index,build_config,revision,index_revision,index_bytes,delta_store,base_tombstones,immutable_segments,active_segment,segment_mode,length(vector_store),DatabaseMutationEntry[],nothing,nothing,checkpoint_operations,checkpoint_bytes,checkpoint_retain_snapshots,nothing,false,database_lock,plan_cache,plan_cache_lock,maintenance_config,MaintenanceState(),SegmentIndexState())
+    return VectorDB(path,dim,metric,vector_store,metadata_store,id_store,index,filter_index,build_config,revision,index_revision,index_bytes,delta_store,base_tombstones,immutable_segments,active_segment,segment_mode,length(vector_store),DatabaseMutationEntry[],IndexBuildState(),nothing,nothing,checkpoint_operations,checkpoint_bytes,checkpoint_retain_snapshots,nothing,false,database_lock,plan_cache,plan_cache_lock,maintenance_config,MaintenanceState(),SegmentIndexState())
 end
 
 struct SearchResult

@@ -44,7 +44,16 @@ using Sen
         @test loaded.build_config==version_two.build_config
     end
 
-    @test_throws ArgumentError create_database_manifest(2,:cosine,1;format_version=3,)
+    version_three=create_database_manifest(2,:cosine,4;format_version=3,nlists=2,revision=8,index_revision=7,iterations=8,seed=9,restarts=2,training_count=4,)
+    @test version_three.format_version==3
+    @test version_three.index_revision==7
+
+    mktempdir() do path
+        save_manifest(path,version_three)
+        @test load_manifest(path)==version_three
+    end
+
+    @test_throws ArgumentError create_database_manifest(2,:cosine,1;format_version=4,)
     @test_throws ArgumentError create_database_manifest(2,:cosine,2;format_version=2,nlists=1,revision=1,index_revision=2,)
     @test_throws ArgumentError create_database_manifest(2,:cosine,1;nlists=2,)
 

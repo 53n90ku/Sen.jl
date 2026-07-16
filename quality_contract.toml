@@ -1,6 +1,6 @@
 format_version = 1
 contract_version = "1.0.0"
-index_version = 1
+index_version = 2
 generator_version = "senbench-clustered-v1"
 
 [[workloads]]
@@ -23,7 +23,7 @@ seed = 301
 selectivity = 1.0
 methods = ["ivf"]
 dataset_sha256 = "b855212b3b894eb024c9aa6b6cb39c6699f3779d865f33044812fc591aa43f84"
-workload_sha256 = "43149a7278c8e1b4ef9c467fe91f9752ebe6b8c83c1908d6e9d072536112d3a5"
+workload_sha256 = "e5e7a7b8fa9a81b5e9d1b1ee1adaa1b797ac48a17caceabe1b7f78b0ed6343c9"
 
 [[workloads]]
 id = "cosine-filtered"
@@ -45,7 +45,7 @@ seed = 302
 selectivity = 0.25
 methods = ["ivf_prefilter", "ivf_postfilter", "filter_aware", "filter_aware_bound"]
 dataset_sha256 = "81a265580097b816d9d68f27aa808457a0d337173d04a905a64bc693a018cffc"
-workload_sha256 = "448dfe1bb1893f43abf5d3826fb444c38fed806f6586f647a12ea24fb89341eb"
+workload_sha256 = "cae8ca5e67f0e16e04ea25535fd25fce878cd9a44f62f4208e73f091abe555e0"
 
 [[workloads]]
 id = "dot-unfiltered"
@@ -67,7 +67,7 @@ seed = 303
 selectivity = 1.0
 methods = ["ivf"]
 dataset_sha256 = "1eb6e84042a732bb4aefd2adfd241f7aded58f9b0d2b5a2561ef1a66667d0340"
-workload_sha256 = "45e055b22348828fa38514de60b4a18c51264c3b48e94f5a4e0d864d1544baad"
+workload_sha256 = "a5181ad18effc3b5fd085dce324cf07f4ce7bf02fa46ef53d1175f1e0f67c855"
 
 [[workloads]]
 id = "dot-filtered"
@@ -89,4 +89,4 @@ seed = 304
 selectivity = 0.25
 methods = ["ivf_prefilter", "ivf_postfilter", "filter_aware"]
 dataset_sha256 = "c0cbf3a9d47febf7783b689fffa2fde22b239d4c7d79507ddd6805e742e458f3"
-workload_sha256 = "f888a4e6ec1322f7cd3f479993806a50501356781b8ca02d29dab578f39552af"
+workload_sha256 = "1c76d71a7e9698e08cd2b80850be6489a185ac414e1cb1e2045202b90d53f606"

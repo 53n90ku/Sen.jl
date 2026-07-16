@@ -16,10 +16,13 @@ using Sen
 
         @test isfile(joinpath(path,"CURRENT"))
         @test isfile(joinpath(snapshot_path,"manifest.toml"))
-        @test isfile(joinpath(snapshot_path,"vectors.bin"))
-        @test isfile(joinpath(snapshot_path,"metadata.bin"))
-        @test isfile(joinpath(snapshot_path,"ids.bin"))
-        @test isfile(joinpath(snapshot_path,"index.bin"))
+        @test isfile(joinpath(snapshot_path,"segments.toml"))
+        @test !isfile(joinpath(snapshot_path,"vectors.bin"))
+        @test !isfile(joinpath(snapshot_path,"metadata.bin"))
+        @test !isfile(joinpath(snapshot_path,"ids.bin"))
+        @test !isfile(joinpath(snapshot_path,"index.bin"))
+        @test isfile(joinpath(snapshot_path,"segment-000001-vectors.bin"))
+        @test isfile(joinpath(snapshot_path,"segment-000001-index.bin"))
         @test isfile(joinpath(snapshot_path,"snapshot.toml"))
 
         expected_length=length(db)
@@ -160,6 +163,34 @@ using Sen
         reopened=load_db(path)
         @test get_record(reopened,"after-recovery").metadata.name=="after-recovery"
         close(reopened)
+    end
+
+    mktempdir() do path
+        db=create_db(path;dim=2,)
+        insert!(db,[1.0,0.0],(name="first",);id="first",)
+        build!(db;nlists=1,iterations=2,)
+        save!(db)
+        first_snapshot=current_database_snapshot(path)
+
+        insert!(db,[0.0,1.0],(name="second",);id="second",)
+        save!(db)
+        corrupted_snapshot=current_database_snapshot(path)
+
+        @test isfile(joinpath(corrupted_snapshot,"segments.toml"))
+        @test !isfile(joinpath(corrupted_snapshot,"vectors.bin"))
+        open(joinpath(corrupted_snapshot,"segment-000001-vectors.bin"),"a") do io
+            write(io,UInt8(0xff))
+        end
+
+        close(db)
+        @test_throws ArgumentError load_db(path)
+
+        recovered=recover_db(path)
+
+        @test current_database_snapshot(path)==first_snapshot
+        @test get_record(recovered,"first").metadata.name=="first"
+        @test_throws KeyError get_record(recovered,"second")
+        close(recovered)
     end
 
     mktempdir() do path

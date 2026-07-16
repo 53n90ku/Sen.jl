@@ -1,11 +1,15 @@
 function maintenance_counts_locked(db::VectorDB)
     base_count=length(db.vector_store)
     delta_count=length(db.delta_store)
-    tombstone_count=count(db.base_tombstones)
+    segment_count=length(db.immutable_segments)
+    additional_tombstones=sum(segment->count(segment.excluded)+length(segment.tombstone_ids),Iterators.drop(db.immutable_segments,1);init=0,)
+    active_additional_tombstones=count(id->!has_id(db.id_store,id),db.active_segment.tombstone_ids)
+    tombstone_count=count(db.base_tombstones)+additional_tombstones+active_additional_tombstones
     denominator=max(1,base_count)
     return(
         base_count=base_count,
         delta_count=delta_count,
+        segment_count=segment_count,
         delta_search_work=delta_count,
         delta_search_limit=db.maintenance_config.max_delta_search_records,
         tombstone_count=tombstone_count,
@@ -22,6 +26,8 @@ function database_maintenance_due_locked(db::VectorDB)
     db.build_config===nothing&&return false
     db.live_count>0||return false
     counts=maintenance_counts_locked(db)
+    segment_due=config.segment_compaction_threshold>0&&counts.segment_count>=config.segment_compaction_threshold
+    segment_due&&return true
     counts.delta_count+counts.tombstone_count>=config.minimum_changes||return false
     delta_due=(config.delta_threshold>0&&counts.delta_count>=config.delta_threshold)||(config.delta_ratio>0&&counts.delta_ratio>=config.delta_ratio)
     tombstone_due=(config.tombstone_threshold>0&&counts.tombstone_count>=config.tombstone_threshold)||(config.tombstone_ratio>0&&counts.tombstone_ratio>=config.tombstone_ratio)

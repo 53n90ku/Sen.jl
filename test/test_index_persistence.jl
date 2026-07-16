@@ -14,6 +14,7 @@ using Sen
         @test loaded.lists==index.lists
         @test loaded.vector_norms==index.vector_norms
         @test loaded.metric===index.metric
+        @test loaded.routing===index.routing
         @test loaded.list_radii==index.list_radii
         @test loaded.list_cos_radii==index.list_cos_radii
         @test loaded.list_sin_radii==index.list_sin_radii
@@ -27,5 +28,33 @@ using Sen
         end
 
         @test_throws ArgumentError load_ivf_index(path)
+    end
+
+
+    mktempdir() do path
+        legacy=build_ivf(Float32[10 1;0 1];nlists=2,iterations=2,seed=8,metric=:dot,)
+        open(joinpath(path,"index.bin"),"w") do io
+            write(io,Sen.IVF_INDEX_MAGIC)
+            write(io,Int64(1))
+            write(io,UInt8(2))
+            write(io,Int64(size(legacy.centroids,1)))
+            write(io,Int64(length(legacy.lists)))
+            write(io,Int64(sum(length,legacy.lists)))
+            write(io,legacy.centroids)
+            write(io,legacy.vector_norms)
+            write(io,legacy.list_radii)
+
+            for list in legacy.lists
+                write(io,Int64(length(list)))
+
+                for vector_index in list
+                    write(io,Int64(vector_index))
+                end
+            end
+        end
+
+        loaded=load_ivf_index(path)
+        @test loaded.metric===:dot
+        @test loaded.routing===:euclidean
     end
 end

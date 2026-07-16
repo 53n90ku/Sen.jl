@@ -76,7 +76,8 @@ end
 
 function seal_database_snapshot(path::AbstractString,revision::UInt64)
     files=snapshot_data_files(path)
-    required=Set(["manifest.toml","vectors.bin","metadata.bin","ids.bin"])
+    segmented=isfile(database_segment_manifest_path(path))
+    required=segmented ? Set(["manifest.toml",DATABASE_SEGMENT_MANIFEST]) : Set(["manifest.toml","vectors.bin","metadata.bin","ids.bin"])
     required⊆Set(files)||throw(ArgumentError("database snapshot is missing required files"))
     file_data=Dict{String,Any}()
 
@@ -208,6 +209,16 @@ end
 function validate_database_snapshot_contents(path::AbstractString)
     descriptor=validate_database_snapshot(path)
     manifest=load_manifest(path)
+    descriptor.revision===nothing||descriptor.revision==manifest.revision||throw(ArgumentError("snapshot revision doesnt match manifest"))
+
+    if isfile(database_segment_manifest_path(path))
+        topology=load_database_segments(path,manifest.dim,manifest.metric,manifest.revision;mmap_vectors=false,)
+        topology===nothing&&error("segment snapshot topology disappeared during validation")
+        length(segment_topology_visible_ids(topology.immutable_segments,topology.active_segment))==manifest.count||throw(DimensionMismatch("stored segment topology count doesnt match manifest"))
+        manifest.format_version<3||topology.index_revision==manifest.index_revision||throw(ArgumentError("segment index revision doesnt match manifest"))
+        return true
+    end
+
     vector_store=load_vector_store(path)
     metadata_store=load_metadata_store(path)
     id_store=load_id_store(path)
@@ -215,8 +226,6 @@ function validate_database_snapshot_contents(path::AbstractString)
     length(vector_store)==manifest.count||throw(DimensionMismatch("stored vector count doesnt match manifest"))
     length(metadata_store)==manifest.count||throw(DimensionMismatch("stored metadata count doesnt match manifest"))
     length(id_store)==manifest.count||throw(DimensionMismatch("stored id count doesnt match manifest"))
-    descriptor.revision===nothing||descriptor.revision==manifest.revision||throw(ArgumentError("snapshot revision doesnt match manifest"))
-
     if manifest.index_revision==manifest.revision
         isfile(index_file_path(path))||throw(ArgumentError("snapshot is missing its current index"))
         ivf=load_ivf_index(path)

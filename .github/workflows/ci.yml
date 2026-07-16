@@ -42,6 +42,10 @@ jobs:
         run: julia --project=benchmark/SenBench scripts/validate_quality_contract.jl
       - name: Enforce crash recovery contract
         run: julia --project=. scripts/test_crash_recovery.jl
+      - name: Verify semantic-search example
+        run: |
+          julia --project=examples -e 'using Pkg; Pkg.instantiate()'
+          julia --project=examples examples/test_semantic_search.jl
       - name: Validate release metadata and API
         run: julia --project=. scripts/validate_release.jl --skip-tests
       - name: Run full package tests

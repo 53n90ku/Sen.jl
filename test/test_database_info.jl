@@ -2,8 +2,14 @@ using Test
 using Sen
 
 @testset "database info" begin
-    config=MaintenanceConfig(enabled=false,)
-    db=create_db("info-db";dim=2,metric=:dot,durable=false,maintenance_config=config,)
+    config=MaintenanceConfig(enabled = false)
+    db=create_db(
+        "info-db";
+        dim = 2,
+        metric = :dot,
+        durable = false,
+        maintenance_config = config,
+    )
     empty_info=database_info(db)
 
     @test !ismutabletype(DatabaseInfo)
@@ -28,7 +34,12 @@ using Sen
     @test !empty_info.maintenance_enabled
     @test !empty_info.maintenance_running
 
-    insert!(db,Float32[1 0 -1;0 1 0],[(name="right",),(name="up",),(name="left",)];ids=[1,2,3],)
+    insert!(
+        db,
+        Float32[1 0 -1; 0 1 0],
+        [(name = "right",), (name = "up",), (name = "left",)];
+        ids = [1, 2, 3],
+    )
     inserted_info=database_info(db)
 
     @test inserted_info.live_count==3
@@ -38,7 +49,7 @@ using Sen
     @test inserted_info.dirty
     @test !inserted_info.built
 
-    build!(db;nlists=2,iterations=3,seed=2,)
+    build!(db; nlists = 2, iterations = 3, seed = 2)
     built_info=database_info(db)
 
     @test built_info.live_count==3
@@ -50,8 +61,8 @@ using Sen
     @test built_info.built
     @test !built_info.dirty
 
-    update!(db,1;vector=Float32[0.5,0.5],)
-    delete!(db,2)
+    update!(db, 1; vector = Float32[0.5, 0.5])
+    delete!(db, 2)
     dirty_info=database_info(db)
 
     @test dirty_info.live_count==2
@@ -72,13 +83,21 @@ using Sen
 end
 
 @testset "maintenance database info" begin
-    config=MaintenanceConfig(minimum_changes=1,delta_threshold=1,delta_ratio=0,tombstone_threshold=0,tombstone_ratio=0,retry_delay_ms=1,persist_after_rebuild=false,)
-    db=create_db("maintenance-info";dim=2,durable=false,maintenance_config=config,)
+    config=MaintenanceConfig(
+        minimum_changes = 1,
+        delta_threshold = 1,
+        delta_ratio = 0,
+        tombstone_threshold = 0,
+        tombstone_ratio = 0,
+        retry_delay_ms = 1,
+        persist_after_rebuild = false,
+    )
+    db=create_db("maintenance-info"; dim = 2, durable = false, maintenance_config = config)
 
-    insert!(db,Float32[1 0;0 1],[(name="right",),(name="up",)];ids=[1,2],)
-    build!(db;nlists=1,iterations=3,seed=3,)
-    insert!(db,Float32[-1,0],(name="left",);id=3,)
-    wait_for_maintenance(db;timeout=10,)
+    insert!(db, Float32[1 0; 0 1], [(name = "right",), (name = "up",)]; ids = [1, 2])
+    build!(db; nlists = 1, iterations = 3, seed = 3)
+    insert!(db, Float32[-1, 0], (name = "left",); id = 3)
+    wait_for_maintenance(db; timeout = 10)
     info=database_info(db)
 
     @test info.maintenance_enabled
@@ -95,9 +114,9 @@ end
 
 @testset "durable database info" begin
     mktempdir() do path
-        db=create_db(path;dim=2,maintenance_config=MaintenanceConfig(enabled=false,),)
-        insert!(db,Float32[1,0],(name="right",);id=1,)
-        build!(db;nlists=1,iterations=3,seed=5,)
+        db=create_db(path; dim = 2, maintenance_config = MaintenanceConfig(enabled = false))
+        insert!(db, Float32[1, 0], (name = "right",); id = 1)
+        build!(db; nlists = 1, iterations = 3, seed = 5)
         save!(db)
         info=database_info(db)
 
@@ -107,7 +126,7 @@ end
         @test info.index_bytes>0
         close(db)
 
-        loaded=load_db(path;maintenance_config=MaintenanceConfig(enabled=false,),)
+        loaded=load_db(path; maintenance_config = MaintenanceConfig(enabled = false))
         loaded_info=database_info(loaded)
 
         @test loaded_info.durable

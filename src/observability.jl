@@ -1,5 +1,5 @@
-function database_index_bytes(index::FilterAwareIVFIndex,filter_index::BitsetIndex)
-    return Base.summarysize((index,filter_index,))
+function database_index_bytes(index::FilterAwareIVFIndex, filter_index::BitsetIndex)
+    return Base.summarysize((index, filter_index))
 end
 
 """
@@ -12,7 +12,7 @@ function database_info(db::VectorDB)
     return with_database_read(db.database_lock) do
         ensure_database_open(db)
         counts=maintenance_counts_locked(db)
-        index_count=db.index===nothing ? 0 : sum(length,db.index.ivf.lists)
+        index_count=db.index===nothing ? 0 : sum(length, db.index.ivf.lists)
         index_lists=db.index===nothing ? 0 : length(db.index.ivf.lists)
         built=has_usable_base(db)&&db.index_revision==db.revision
         dirty=db.revision>0&&(db.index_revision===nothing||db.index_revision!=db.revision)

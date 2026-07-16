@@ -9,7 +9,7 @@ end
 
 function DatabaseLock()
     gate=ReentrantLock()
-    return DatabaseLock(Threads.Condition(gate),0,IdDict{Task,Int}(),nothing,0,0)
+    return DatabaseLock(Threads.Condition(gate), 0, IdDict{Task,Int}(), nothing, 0, 0)
 end
 
 function lock_database_read!(lock::DatabaseLock)
@@ -17,14 +17,14 @@ function lock_database_read!(lock::DatabaseLock)
     Base.lock(lock.condition)
 
     try
-        nested=get(lock.reader_depth,task,0)>0||lock.writer===task
+        nested=get(lock.reader_depth, task, 0)>0||lock.writer===task
 
         while !nested&&(lock.writer!==nothing||lock.waiting_writers>0)
             wait(lock.condition)
         end
 
         lock.readers+=1
-        lock.reader_depth[task]=get(lock.reader_depth,task,0)+1
+        lock.reader_depth[task]=get(lock.reader_depth, task, 0)+1
     finally
         Base.unlock(lock.condition)
     end
@@ -37,17 +37,17 @@ function unlock_database_read!(lock::DatabaseLock)
     Base.lock(lock.condition)
 
     try
-        depth=get(lock.reader_depth,task,0)
+        depth=get(lock.reader_depth, task, 0)
         depth>0||throw(ArgumentError("database read lock is not held by this task"))
 
         if depth==1
-            delete!(lock.reader_depth,task)
+            delete!(lock.reader_depth, task)
         else
             lock.reader_depth[task]=depth-1
         end
 
         lock.readers-=1
-        lock.readers==0&&notify(lock.condition;all=true,)
+        lock.readers==0&&notify(lock.condition; all = true)
     finally
         Base.unlock(lock.condition)
     end
@@ -65,7 +65,9 @@ function lock_database_write!(lock::DatabaseLock)
             return lock
         end
 
-        get(lock.reader_depth,task,0)==0||throw(ArgumentError("database lock cannot be upgraded from read to write"))
+        get(lock.reader_depth, task, 0)==0||throw(
+            ArgumentError("database lock cannot be upgraded from read to write"),
+        )
         lock.waiting_writers+=1
 
         try
@@ -90,12 +92,14 @@ function unlock_database_write!(lock::DatabaseLock)
     Base.lock(lock.condition)
 
     try
-        lock.writer===task||throw(ArgumentError("database write lock is not held by this task"))
+        lock.writer===task||throw(
+            ArgumentError("database write lock is not held by this task"),
+        )
         lock.writer_depth-=1
 
         if lock.writer_depth==0
             lock.writer=nothing
-            notify(lock.condition;all=true,)
+            notify(lock.condition; all = true)
         end
     finally
         Base.unlock(lock.condition)
@@ -104,7 +108,7 @@ function unlock_database_write!(lock::DatabaseLock)
     return lock
 end
 
-function with_database_read(f::Function,lock::DatabaseLock)
+function with_database_read(f::Function, lock::DatabaseLock)
     lock_database_read!(lock)
 
     try
@@ -114,7 +118,7 @@ function with_database_read(f::Function,lock::DatabaseLock)
     end
 end
 
-function with_database_write(f::Function,lock::DatabaseLock)
+function with_database_write(f::Function, lock::DatabaseLock)
     lock_database_write!(lock)
 
     try

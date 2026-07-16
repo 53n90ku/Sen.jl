@@ -40,10 +40,10 @@ using Sen
     @test stable_api()===STABLE_API_V1
     @test stable_api()==expected
     @test length(unique(stable_api()))==length(stable_api())
-    @test Set(names(Sen))==Set((:Sen,:STABLE_API_V1,:stable_api,expected...,))
+    @test Set(names(Sen))==Set((:Sen, :STABLE_API_V1, :stable_api, expected...))
 
     for name in stable_api()
-        @test isdefined(Sen,name)
-        @test Base.isexported(Sen,name)
+        @test isdefined(Sen, name)
+        @test Base.isexported(Sen, name)
     end
 end

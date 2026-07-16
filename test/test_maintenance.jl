@@ -16,39 +16,58 @@ using Sen
     @test config.max_retries==3
     @test config.retry_delay_ms==50
     @test config.persist_after_rebuild
-    @test MaintenanceConfig(delta_ratio=0,tombstone_ratio=0,).delta_ratio==0.0
-    @test_throws ArgumentError MaintenanceConfig(minimum_changes=0,)
-    @test_throws ArgumentError MaintenanceConfig(delta_threshold=-1,)
-    @test_throws ArgumentError MaintenanceConfig(delta_ratio=1.1,)
-    @test_throws ArgumentError MaintenanceConfig(max_delta_search_records=0,)
-    @test_throws ArgumentError MaintenanceConfig(active_segment_threshold=0,)
-    @test_throws ArgumentError MaintenanceConfig(max_delta_search_records=2,active_segment_threshold=3,)
-    @test_throws ArgumentError MaintenanceConfig(segment_compaction_threshold=1,)
-    @test MaintenanceConfig(segment_compaction_threshold=0,).segment_compaction_threshold==0
-    @test_throws ArgumentError MaintenanceConfig(tombstone_threshold=-1,)
-    @test_throws ArgumentError MaintenanceConfig(tombstone_ratio=-0.1,)
-    @test_throws ArgumentError MaintenanceConfig(max_retries=-1,)
-    @test_throws ArgumentError MaintenanceConfig(retry_delay_ms=-1,)
+    @test MaintenanceConfig(delta_ratio = 0, tombstone_ratio = 0).delta_ratio==0.0
+    @test_throws ArgumentError MaintenanceConfig(minimum_changes = 0)
+    @test_throws ArgumentError MaintenanceConfig(delta_threshold = -1)
+    @test_throws ArgumentError MaintenanceConfig(delta_ratio = 1.1)
+    @test_throws ArgumentError MaintenanceConfig(max_delta_search_records = 0)
+    @test_throws ArgumentError MaintenanceConfig(active_segment_threshold = 0)
+    @test_throws ArgumentError MaintenanceConfig(
+        max_delta_search_records = 2,
+        active_segment_threshold = 3,
+    )
+    @test_throws ArgumentError MaintenanceConfig(segment_compaction_threshold = 1)
+    @test MaintenanceConfig(segment_compaction_threshold = 0).segment_compaction_threshold==0
+    @test_throws ArgumentError MaintenanceConfig(tombstone_threshold = -1)
+    @test_throws ArgumentError MaintenanceConfig(tombstone_ratio = -0.1)
+    @test_throws ArgumentError MaintenanceConfig(max_retries = -1)
+    @test_throws ArgumentError MaintenanceConfig(retry_delay_ms = -1)
 end
 
 @testset "committed mutation recovery preserves active build tail" begin
     mktempdir() do path
-        config=MaintenanceConfig(enabled=false,max_delta_search_records=8,persist_after_rebuild=false,)
-        db=create_db(path;dim=2,maintenance_config=config,checkpoint_operations=0,checkpoint_bytes=0,)
-        insert!(db,Float32[1 0;0 1],[(name="right",),(name="up",)];ids=[1,2],)
-        build!(db;nlists=1,iterations=2,seed=72,)
+        config=MaintenanceConfig(
+            enabled = false,
+            max_delta_search_records = 8,
+            persist_after_rebuild = false,
+        )
+        db=create_db(
+            path;
+            dim = 2,
+            maintenance_config = config,
+            checkpoint_operations = 0,
+            checkpoint_bytes = 0,
+        )
+        insert!(db, Float32[1 0; 0 1], [(name = "right",), (name = "up",)]; ids = [1, 2])
+        build!(db; nlists = 1, iterations = 2, seed = 72)
         save!(db)
         snapshot_ready=Channel{UInt64}(1)
         release_build=Channel{Nothing}(1)
-        builder=Threads.@spawn build!(db;nlists=1,iterations=2,seed=73,_snapshot_hook=snapshot->begin
-            put!(snapshot_ready,snapshot.revision)
-            take!(release_build)
-        end,)
+        builder=Threads.@spawn build!(
+            db;
+            nlists = 1,
+            iterations = 2,
+            seed = 73,
+            _snapshot_hook = snapshot->begin
+                put!(snapshot_ready, snapshot.revision)
+                take!(release_build)
+            end,
+        )
         build_revision=take!(snapshot_ready)
 
         Sen.inject_database_mutation_fault!(:after_wal)
         error=try
-            insert!(db,Float32[-1,0],(name="left",);id=3,)
+            insert!(db, Float32[-1, 0], (name = "left",); id = 3)
             nothing
         catch caught
             caught
@@ -56,33 +75,48 @@ end
 
         @test error isa Sen.DatabaseMutationCommittedError
         @test [entry.revision for entry in db.mutation_history]==[build_revision+1]
-        put!(release_build,nothing)
+        put!(release_build, nothing)
         fetch(builder)
         @test isempty(db.mutation_history)
-        @test get_record(db,3).metadata.name=="left"
+        @test get_record(db, 3).metadata.name=="left"
         close(db)
     end
 end
 
 @testset "index generation rebases concurrent mutations" begin
-    config=MaintenanceConfig(enabled=false,max_delta_search_records=64,persist_after_rebuild=false,)
-    db=create_db("generation-rebase";dim=2,durable=false,maintenance_config=config,)
-    insert!(db,Float32[1 0 -1;0 1 0],[(name="right",),(name="up",),(name="left",)];ids=["right","up","left"],)
-    build!(db;nlists=1,iterations=3,seed=21,)
+    config=MaintenanceConfig(
+        enabled = false,
+        max_delta_search_records = 64,
+        persist_after_rebuild = false,
+    )
+    db=create_db("generation-rebase"; dim = 2, durable = false, maintenance_config = config)
+    insert!(
+        db,
+        Float32[1 0 -1; 0 1 0],
+        [(name = "right",), (name = "up",), (name = "left",)];
+        ids = ["right", "up", "left"],
+    )
+    build!(db; nlists = 1, iterations = 3, seed = 21)
     snapshot_ready=Channel{UInt64}(1)
     release_build=Channel{Nothing}(1)
     hook=snapshot->begin
-        put!(snapshot_ready,snapshot.revision)
+        put!(snapshot_ready, snapshot.revision)
         take!(release_build)
     end
-    builder=Threads.@spawn build!(db;nlists=1,iterations=4,seed=22,_snapshot_hook=hook,)
+    builder=Threads.@spawn build!(
+        db;
+        nlists = 1,
+        iterations = 4,
+        seed = 22,
+        _snapshot_hook = hook,
+    )
     build_revision=take!(snapshot_ready)
 
-    insert!(db,[0.7,0.7],(name="diagonal",);id="diagonal",)
-    update!(db,"right";vector=[0.9,0.1],metadata=(name="right-new",),)
-    delete!(db,"up")
-    @test [entry.revision for entry in db.mutation_history]==collect(build_revision+1:db.revision)
-    put!(release_build,nothing)
+    insert!(db, [0.7, 0.7], (name = "diagonal",); id = "diagonal")
+    update!(db, "right"; vector = [0.9, 0.1], metadata = (name = "right-new",))
+    delete!(db, "up")
+    @test [entry.revision for entry in db.mutation_history]==collect((build_revision+1):db.revision)
+    put!(release_build, nothing)
     fetch(builder)
 
     @test db.index_revision==build_revision
@@ -90,10 +124,12 @@ end
     @test !is_built(db)
     @test Sen.delta_search_work(db)==2
     @test isempty(db.mutation_history)
-    @test get_record(db,"right").metadata==(name="right-new",)
-    @test get_record(db,"diagonal").metadata==(name="diagonal",)
-    @test_throws KeyError get_record(db,"up")
-    @test Set(result.id for result in search(db,[1.0,0.0];k=3,strategy=:ivf,nprobe=1,))==Set(["right","left","diagonal"])
+    @test get_record(db, "right").metadata==(name = "right-new",)
+    @test get_record(db, "diagonal").metadata==(name = "diagonal",)
+    @test_throws KeyError get_record(db, "up")
+    @test Set(
+        result.id for result in search(db, [1.0, 0.0]; k = 3, strategy = :ivf, nprobe = 1)
+    )==Set(["right", "left", "diagonal"])
 
     rebuild!(db)
     @test is_built(db)
@@ -103,140 +139,207 @@ end
 
 @testset "automatic segment compaction" begin
     config=MaintenanceConfig(
-        minimum_changes=1_000,
-        delta_threshold=0,
-        delta_ratio=0.0,
-        max_delta_search_records=2,
-        active_segment_threshold=2,
-        segment_compaction_threshold=3,
-        incremental_indexing=false,
-        tombstone_threshold=0,
-        tombstone_ratio=0.0,
-        retry_delay_ms=1,
-        persist_after_rebuild=false,
+        minimum_changes = 1_000,
+        delta_threshold = 0,
+        delta_ratio = 0.0,
+        max_delta_search_records = 2,
+        active_segment_threshold = 2,
+        segment_compaction_threshold = 3,
+        incremental_indexing = false,
+        tombstone_threshold = 0,
+        tombstone_ratio = 0.0,
+        retry_delay_ms = 1,
+        persist_after_rebuild = false,
     )
-    db=create_db("automatic-segment-compaction";dim=2,metric=:dot,durable=false,maintenance_config=config,)
-    insert!(db,Float32[10 1;0 1],[(version=1,),(version=1,)];ids=[1,2],)
-    build!(db;nlists=2,iterations=2,seed=71,)
+    db=create_db(
+        "automatic-segment-compaction";
+        dim = 2,
+        metric = :dot,
+        durable = false,
+        maintenance_config = config,
+    )
+    insert!(db, Float32[10 1; 0 1], [(version = 1,), (version = 1,)]; ids = [1, 2])
+    build!(db; nlists = 2, iterations = 2, seed = 71)
 
-    for id in 3:6
-        insert!(db,Float32[id,1],(version=id,);id=id,)
+    for id = 3:6
+        insert!(db, Float32[id, 1], (version = id,); id = id)
     end
 
-    status=wait_for_maintenance(db;timeout=10.0,)
+    status=wait_for_maintenance(db; timeout = 10.0)
     @test status.status==:completed
     @test status.segment_count==1
     @test length(db.immutable_segments)==1
     @test Sen.active_segment_is_empty(db.active_segment)
     @test isempty(db.mutation_history)
     @test is_built(db)
-    @test [result.id for result in search(db,Float32[1,1];k=6,strategy=:exact,)]==[1,6,5,4,3,2]
+    @test [result.id for result in search(db, Float32[1, 1]; k = 6, strategy = :exact)]==[1, 6, 5, 4, 3, 2]
 
-    insert!(db,Float32[0,2],(version=7,);id=7,)
+    insert!(db, Float32[0, 2], (version = 7,); id = 7)
     compact!(db)
     @test length(db.immutable_segments)==1
     @test Sen.active_segment_is_empty(db.active_segment)
     @test is_built(db)
-    @test get_record(db,7).metadata.version==7
+    @test get_record(db, 7).metadata.version==7
     close(db)
 end
 
 @testset "delta search work is hard bounded" begin
-    config=MaintenanceConfig(enabled=false,max_delta_search_records=3,persist_after_rebuild=false,)
-    db=create_db("bounded-delta";dim=2,durable=false,maintenance_config=config,)
-    initial_vectors=Matrix{Float32}(undef,2,12)
+    config=MaintenanceConfig(
+        enabled = false,
+        max_delta_search_records = 3,
+        persist_after_rebuild = false,
+    )
+    db=create_db("bounded-delta"; dim = 2, durable = false, maintenance_config = config)
+    initial_vectors=Matrix{Float32}(undef, 2, 12)
 
-    for id in 1:12
-        initial_vectors[:,id].=Float32[1,id/20]
+    for id = 1:12
+        initial_vectors[:, id].=Float32[1, id/20]
     end
 
-    insert!(db,initial_vectors,[(number=id,) for id in 1:12];ids=collect(1:12),)
-    build!(db;nlists=2,iterations=3,seed=31,)
+    insert!(db, initial_vectors, [(number = id,) for id = 1:12]; ids = collect(1:12))
+    build!(db; nlists = 2, iterations = 3, seed = 31)
 
-    for id in 13:30
-        insert!(db,Float32[1,id/20],(number=id,);id=id,)
+    for id = 13:30
+        insert!(db, Float32[1, id/20], (number = id,); id = id)
         @test Sen.delta_search_work(db)<=config.max_delta_search_records
-        @test !isempty(search(db,Float32[1,0];k=3,strategy=:ivf,nprobe=2,))
+        @test !isempty(search(db, Float32[1, 0]; k = 3, strategy = :ivf, nprobe = 2))
     end
 
-    segment_status=Sen.wait_for_segment_indexing(db;timeout=10.0,)
+    segment_status=Sen.wait_for_segment_indexing(db; timeout = 10.0)
     @test segment_status.status==:completed
     @test Sen.delta_search_work(db)==0
     @test length(db.immutable_segments)==7
-    @test all(segment->segment.index!==nothing,db.immutable_segments)
+    @test all(segment->segment.index!==nothing, db.immutable_segments)
     revision=db.revision
-    oversized=Float32[1 1 1 1;2 3 4 5]
-    @test_throws ArgumentError insert!(db,oversized,[(number=id,) for id in 31:34];ids=collect(31:34),)
+    oversized=Float32[1 1 1 1; 2 3 4 5]
+    @test_throws ArgumentError insert!(
+        db,
+        oversized,
+        [(number = id,) for id = 31:34];
+        ids = collect(31:34),
+    )
     @test db.revision==revision
     @test length(db)==30
     @test Sen.delta_search_work(db)==0
 
-    queries=Float32[1 1;0 1]
-    @test length(search(db,queries;k=3,parallel=false,strategy=:exact,))==2
+    queries=Float32[1 1; 0 1]
+    @test length(search(db, queries; k = 3, parallel = false, strategy = :exact))==2
     info=database_info(db)
     @test info.delta_search_work==Sen.delta_search_work(db)
     @test info.delta_search_limit==3
 
-    configure_maintenance!(db,MaintenanceConfig(enabled=false,max_delta_search_records=1,persist_after_rebuild=false,))
+    configure_maintenance!(
+        db,
+        MaintenanceConfig(
+            enabled = false,
+            max_delta_search_records = 1,
+            persist_after_rebuild = false,
+        ),
+    )
     @test Sen.delta_search_work(db)==0
     @test database_info(db).delta_search_limit==1
     close(db)
 end
 
 @testset "automatic delta maintenance" begin
-    config=MaintenanceConfig(minimum_changes=1,delta_threshold=1,delta_ratio=0.0,tombstone_threshold=0,tombstone_ratio=0.0,retry_delay_ms=1,persist_after_rebuild=false,)
-    db=create_db("maintenance-delta";dim=2,durable=false,maintenance_config=config,)
+    config=MaintenanceConfig(
+        minimum_changes = 1,
+        delta_threshold = 1,
+        delta_ratio = 0.0,
+        tombstone_threshold = 0,
+        tombstone_ratio = 0.0,
+        retry_delay_ms = 1,
+        persist_after_rebuild = false,
+    )
+    db=create_db("maintenance-delta"; dim = 2, durable = false, maintenance_config = config)
 
-    insert!(db,Float32[1 0 1 0;0 1 1 -1],[(name="right",),(name="up",),(name="diagonal",),(name="down",)];ids=[1,2,3,4],)
-    build!(db;nlists=2,iterations=3,seed=11,)
-    insert!(db,Float32[-1,0],(name="left",);id=5,)
+    insert!(
+        db,
+        Float32[1 0 1 0; 0 1 1 -1],
+        [(name = "right",), (name = "up",), (name = "diagonal",), (name = "down",)];
+        ids = [1, 2, 3, 4],
+    )
+    build!(db; nlists = 2, iterations = 3, seed = 11)
+    insert!(db, Float32[-1, 0], (name = "left",); id = 5)
 
-    status=wait_for_maintenance(db;timeout=10.0,)
+    status=wait_for_maintenance(db; timeout = 10.0)
 
     @test status.status==:completed
     @test status.delta_count==0
     @test status.tombstone_count==0
     @test status.last_completed_revision==db.revision
     @test is_built(db)
-    @test get_record(db,5).metadata==(name="left",)
+    @test get_record(db, 5).metadata==(name = "left",)
     close(db)
 end
 
 @testset "automatic tombstone maintenance" begin
-    config=MaintenanceConfig(minimum_changes=1,delta_threshold=0,delta_ratio=0.0,tombstone_threshold=1,tombstone_ratio=0.0,retry_delay_ms=1,persist_after_rebuild=false,)
-    db=create_db("maintenance-tombstone";dim=2,durable=false,maintenance_config=config,)
+    config=MaintenanceConfig(
+        minimum_changes = 1,
+        delta_threshold = 0,
+        delta_ratio = 0.0,
+        tombstone_threshold = 1,
+        tombstone_ratio = 0.0,
+        retry_delay_ms = 1,
+        persist_after_rebuild = false,
+    )
+    db=create_db(
+        "maintenance-tombstone";
+        dim = 2,
+        durable = false,
+        maintenance_config = config,
+    )
 
-    insert!(db,Float32[1 0 -1;0 1 0],[(name="right",),(name="up",),(name="left",)];ids=[1,2,3],)
-    build!(db;nlists=3,iterations=3,seed=7,)
-    delete!(db,1)
+    insert!(
+        db,
+        Float32[1 0 -1; 0 1 0],
+        [(name = "right",), (name = "up",), (name = "left",)];
+        ids = [1, 2, 3],
+    )
+    build!(db; nlists = 3, iterations = 3, seed = 7)
+    delete!(db, 1)
 
-    status=wait_for_maintenance(db;timeout=10.0,)
+    status=wait_for_maintenance(db; timeout = 10.0)
 
     @test status.status==:completed
     @test status.base_count==2
     @test status.tombstone_count==0
     @test is_built(db)
-    @test_throws KeyError get_record(db,1)
-    @test get_record(db,2).metadata==(name="up",)
+    @test_throws KeyError get_record(db, 1)
+    @test get_record(db, 2).metadata==(name = "up",)
     close(db)
 end
 
 @testset "maintenance preserves concurrent writes" begin
-    config=MaintenanceConfig(minimum_changes=1,delta_threshold=1,delta_ratio=0.0,tombstone_threshold=1,tombstone_ratio=0.0,max_retries=20,retry_delay_ms=1,persist_after_rebuild=false,)
-    db=create_db("maintenance-concurrent";dim=8,durable=false,maintenance_config=config,)
-    vectors=rand(Float32,8,2_000)
-    metadata=[(number=index,) for index in 1:2_000]
+    config=MaintenanceConfig(
+        minimum_changes = 1,
+        delta_threshold = 1,
+        delta_ratio = 0.0,
+        tombstone_threshold = 1,
+        tombstone_ratio = 0.0,
+        max_retries = 20,
+        retry_delay_ms = 1,
+        persist_after_rebuild = false,
+    )
+    db=create_db(
+        "maintenance-concurrent";
+        dim = 8,
+        durable = false,
+        maintenance_config = config,
+    )
+    vectors=rand(Float32, 8, 2_000)
+    metadata=[(number = index,) for index = 1:2_000]
 
-    insert!(db,vectors,metadata;ids=collect(1:2_000),)
-    build!(db;nlists=16,iterations=8,seed=9,)
-    insert!(db,rand(Float32,8),(number=2_001,);id=2_001,)
+    insert!(db, vectors, metadata; ids = collect(1:2_000))
+    build!(db; nlists = 16, iterations = 8, seed = 9)
+    insert!(db, rand(Float32, 8), (number = 2_001,); id = 2_001)
 
-    for id in 2_002:2_025
-        insert!(db,rand(Float32,8),(number=id,);id=id,)
+    for id = 2_002:2_025
+        insert!(db, rand(Float32, 8), (number = id,); id = id)
         yield()
     end
 
-    status=wait_for_maintenance(db;timeout=30.0,)
+    status=wait_for_maintenance(db; timeout = 30.0)
 
     @test status.status==:completed
     @test status.attempts>=1
@@ -245,8 +348,8 @@ end
     @test length(db)==2_025
     @test is_built(db)
 
-    for id in 2_001:2_025
-        @test get_record(db,id).metadata==(number=id,)
+    for id = 2_001:2_025
+        @test get_record(db, id).metadata==(number = id,)
     end
 
     close(db)
@@ -254,24 +357,37 @@ end
 
 @testset "durable maintenance snapshot" begin
     mktempdir() do path
-        config=MaintenanceConfig(minimum_changes=1,delta_threshold=1,delta_ratio=0.0,tombstone_threshold=0,tombstone_ratio=0.0,retry_delay_ms=1,persist_after_rebuild=true,)
-        db=create_db(path;dim=2,maintenance_config=config,checkpoint_retain_snapshots=1,)
+        config=MaintenanceConfig(
+            minimum_changes = 1,
+            delta_threshold = 1,
+            delta_ratio = 0.0,
+            tombstone_threshold = 0,
+            tombstone_ratio = 0.0,
+            retry_delay_ms = 1,
+            persist_after_rebuild = true,
+        )
+        db=create_db(
+            path;
+            dim = 2,
+            maintenance_config = config,
+            checkpoint_retain_snapshots = 1,
+        )
 
-        insert!(db,Float32[1 0;0 1],[(name="right",),(name="up",)];ids=[1,2],)
-        build!(db;nlists=1,iterations=3,seed=4,)
-        save!(db;retain_snapshots=1,)
-        insert!(db,Float32[-1,0],(name="left",);id=3,)
-        status=wait_for_maintenance(db;timeout=10.0,)
+        insert!(db, Float32[1 0; 0 1], [(name = "right",), (name = "up",)]; ids = [1, 2])
+        build!(db; nlists = 1, iterations = 3, seed = 4)
+        save!(db; retain_snapshots = 1)
+        insert!(db, Float32[-1, 0], (name = "left",); id = 3)
+        status=wait_for_maintenance(db; timeout = 10.0)
 
         @test status.status==:completed
         @test is_built(db)
         @test length(database_snapshot_generations(path))==1
         close(db)
 
-        loaded=load_db(path;maintenance_config=MaintenanceConfig(enabled=false,),)
+        loaded=load_db(path; maintenance_config = MaintenanceConfig(enabled = false))
         @test is_built(loaded)
         @test length(loaded)==3
-        @test get_record(loaded,3).metadata==(name="left",)
+        @test get_record(loaded, 3).metadata==(name = "left",)
         close(loaded)
     end
 end

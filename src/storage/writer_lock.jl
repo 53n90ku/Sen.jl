@@ -106,13 +106,24 @@ end
 
 function Base.close(db::VectorDB)
     stop_database_maintenance!(db)
+    stop_segment_indexing!(db)
 
     return with_database_write(db.database_lock) do
         db.closed&&return nothing
         io=db.writer_lock
         db.writer_lock=nothing
         db.closed=true
-        release_vector_store_mapping!(db.vector_store)
+        released=IdSet{VectorStore}()
+
+        for segment in db.immutable_segments
+            segment.vector_store in released&&continue
+            push!(released,segment.vector_store)
+            release_vector_store_mapping!(segment.vector_store)
+        end
+
+        if !(db.vector_store in released)
+            release_vector_store_mapping!(db.vector_store)
+        end
         io===nothing||release_database_writer_lock(io)
         return nothing
     end

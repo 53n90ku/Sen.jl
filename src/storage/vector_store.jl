@@ -147,10 +147,16 @@ function should_mmap_vector_store(mode::Union{Bool,Symbol},payload_bytes::Int,th
     return mode===true||(mode===:auto&&payload_bytes>=threshold_bytes)
 end
 
-function save_vector_store(path::AbstractString,store::VectorStore)
+function vector_store_path(path::AbstractString,filename::AbstractString="vectors.bin")
+    isempty(filename)&&throw(ArgumentError("vector filename cannot be empty"))
+    basename(filename)==filename||throw(ArgumentError("vector filename must be a basename"))
+    return joinpath(path,filename)
+end
+
+function save_vector_store(path::AbstractString,store::VectorStore;filename::AbstractString="vectors.bin",)
     mkpath(path)
 
-    vector_path=joinpath(path,"vectors.bin")
+    vector_path=vector_store_path(path,filename)
 
     open(vector_path,"w") do io
         write(io,VECTOR_STORE_MAGIC)
@@ -162,8 +168,8 @@ function save_vector_store(path::AbstractString,store::VectorStore)
     return vector_path
 end
 
-function load_vector_store(path::AbstractString;mmap::Union{Bool,Symbol}=:auto,mmap_threshold_bytes::Int=DEFAULT_VECTOR_MMAP_THRESHOLD_BYTES,)
-    vector_path=joinpath(path,"vectors.bin")
+function load_vector_store(path::AbstractString;filename::AbstractString="vectors.bin",mmap::Union{Bool,Symbol}=:auto,mmap_threshold_bytes::Int=DEFAULT_VECTOR_MMAP_THRESHOLD_BYTES,)
+    vector_path=vector_store_path(path,filename)
     isfile(vector_path)||throw(ArgumentError("vector file does not exist"))
 
     return open(vector_path,"r") do io

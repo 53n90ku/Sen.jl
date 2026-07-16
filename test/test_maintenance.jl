@@ -9,6 +9,8 @@ using Sen
     @test config.delta_threshold==10_000
     @test config.delta_ratio==0.10
     @test config.max_delta_search_records==20_000
+    @test config.active_segment_threshold==10_000
+    @test config.incremental_indexing
     @test config.tombstone_threshold==10_000
     @test config.tombstone_ratio==0.10
     @test config.max_retries==3
@@ -19,6 +21,8 @@ using Sen
     @test_throws ArgumentError MaintenanceConfig(delta_threshold=-1,)
     @test_throws ArgumentError MaintenanceConfig(delta_ratio=1.1,)
     @test_throws ArgumentError MaintenanceConfig(max_delta_search_records=0,)
+    @test_throws ArgumentError MaintenanceConfig(active_segment_threshold=0,)
+    @test_throws ArgumentError MaintenanceConfig(max_delta_search_records=2,active_segment_threshold=3,)
     @test_throws ArgumentError MaintenanceConfig(tombstone_threshold=-1,)
     @test_throws ArgumentError MaintenanceConfig(tombstone_ratio=-0.1,)
     @test_throws ArgumentError MaintenanceConfig(max_retries=-1,)
@@ -79,13 +83,17 @@ end
         @test !isempty(search(db,Float32[1,0];k=3,strategy=:ivf,nprobe=2,))
     end
 
-    @test Sen.delta_search_work(db)==3
+    segment_status=Sen.wait_for_segment_indexing(db;timeout=10.0,)
+    @test segment_status.status==:completed
+    @test Sen.delta_search_work(db)==0
+    @test length(db.immutable_segments)==7
+    @test all(segment->segment.index!==nothing,db.immutable_segments)
     revision=db.revision
     oversized=Float32[1 1 1 1;2 3 4 5]
     @test_throws ArgumentError insert!(db,oversized,[(number=id,) for id in 31:34];ids=collect(31:34),)
     @test db.revision==revision
     @test length(db)==30
-    @test Sen.delta_search_work(db)==3
+    @test Sen.delta_search_work(db)==0
 
     queries=Float32[1 1;0 1]
     @test length(search(db,queries;k=3,parallel=false,strategy=:exact,))==2

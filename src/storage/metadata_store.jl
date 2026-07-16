@@ -44,10 +44,16 @@ Base.length(store::MetadataStore)=length(store.metadata)
 const METADATA_STORE_MAGIC_V1=UInt8[0x53,0x45,0x4e,0x4d,0x45,0x54,0x30,0x31]
 const METADATA_STORE_MAGIC_V2=UInt8[0x53,0x45,0x4e,0x4d,0x45,0x54,0x30,0x32]
 
-function save_metadata_store(path::AbstractString,store::MetadataStore)
+function metadata_store_path(path::AbstractString,filename::AbstractString="metadata.bin")
+    isempty(filename)&&throw(ArgumentError("metadata filename cannot be empty"))
+    basename(filename)==filename||throw(ArgumentError("metadata filename must be a basename"))
+    return joinpath(path,filename)
+end
+
+function save_metadata_store(path::AbstractString,store::MetadataStore;filename::AbstractString="metadata.bin",)
     mkpath(path)
 
-    metadata_path=joinpath(path,"metadata.bin")
+    metadata_path=metadata_store_path(path,filename)
 
     open(metadata_path,"w") do io
         write(io,METADATA_STORE_MAGIC_V2)
@@ -62,8 +68,8 @@ function save_metadata_store(path::AbstractString,store::MetadataStore)
     return metadata_path
 end
 
-function load_metadata_store(path::AbstractString)
-    metadata_path=joinpath(path,"metadata.bin")
+function load_metadata_store(path::AbstractString;filename::AbstractString="metadata.bin",)
+    metadata_path=metadata_store_path(path,filename)
     isfile(metadata_path)||throw(ArgumentError("metadata file does not exist"))
 
     return open(metadata_path,"r") do io

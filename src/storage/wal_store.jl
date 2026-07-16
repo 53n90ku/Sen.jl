@@ -357,6 +357,11 @@ function apply_database_wal_record!(db::VectorDB,record::DatabaseWALRecord)
     end
 
     db.revision=record.revision
+    if db.segment_mode
+        mark_active_segment_revision!(db.active_segment,record.revision)
+    else
+        synchronize_primary_segment!(db;revision_end=record.revision,)
+    end
     body=record.operation==DATABASE_WAL_PUT ? database_wal_put_body(record.revision,record.vectors,record.metadata,record.ids) : database_wal_delete_body(record.revision,record.ids)
     record_database_mutation!(db,record.revision,body)
     clear_plan_cache!(db)

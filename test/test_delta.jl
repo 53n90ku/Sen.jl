@@ -100,9 +100,10 @@ end
 
         @test length(loaded)==3
         @test is_dirty(loaded)
-        @test loaded.index===nothing
-        @test length(loaded.delta_store)==0
-        @test !any(loaded.base_tombstones)
+        @test loaded.index!==nothing
+        @test loaded.index_revision<loaded.revision
+        @test length(loaded.delta_store)==2
+        @test count(loaded.base_tombstones)==2
         @test [result.id for result in results]==["update","insert","keep"]
         @test get_record(loaded,"update").metadata.state=="updated"
         @test get_record(loaded,"insert").metadata.state=="inserted"

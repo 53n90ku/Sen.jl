@@ -1,13 +1,15 @@
 const IVF_INDEX_MAGIC=UInt8[0x53,0x45,0x4e,0x49,0x44,0x58,0x30,0x31]
 const IVF_INDEX_VERSION=1
 
-function index_file_path(path::AbstractString)
-    return joinpath(path,"index.bin")
+function index_file_path(path::AbstractString,filename::AbstractString="index.bin")
+    isempty(filename)&&throw(ArgumentError("index filename cannot be empty"))
+    basename(filename)==filename||throw(ArgumentError("index filename must be a basename"))
+    return joinpath(path,filename)
 end
 
-function save_ivf_index(path::AbstractString,index::IVFIndex)
+function save_ivf_index(path::AbstractString,index::IVFIndex;filename::AbstractString="index.bin",)
     mkpath(path)
-    index_path=index_file_path(path)
+    index_path=index_file_path(path,filename)
     dim,list_count=size(index.centroids)
     vector_count=sum(length,index.lists)
     index.metric in (:cosine,:dot)||throw(ArgumentError("index metric must be cosine or dot"))
@@ -37,8 +39,8 @@ function save_ivf_index(path::AbstractString,index::IVFIndex)
     return index_path
 end
 
-function load_ivf_index(path::AbstractString)
-    index_path=index_file_path(path)
+function load_ivf_index(path::AbstractString;filename::AbstractString="index.bin",)
+    index_path=index_file_path(path,filename)
     isfile(index_path)||throw(ArgumentError("index file does not exist"))
 
     return open(index_path,"r") do io
@@ -95,8 +97,8 @@ function load_ivf_index(path::AbstractString)
     end
 end
 
-function remove_ivf_index(path::AbstractString)
-    index_path=index_file_path(path)
+function remove_ivf_index(path::AbstractString;filename::AbstractString="index.bin",)
+    index_path=index_file_path(path,filename)
     isfile(index_path)&&rm(index_path)
     return nothing
 end

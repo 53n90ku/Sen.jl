@@ -75,10 +75,16 @@ function next_available_id(store::IDStore)
     return id
 end
 
-function save_id_store(path::AbstractString,store::IDStore)
+function id_store_path(path::AbstractString,filename::AbstractString="ids.bin")
+    isempty(filename)&&throw(ArgumentError("id filename cannot be empty"))
+    basename(filename)==filename||throw(ArgumentError("id filename must be a basename"))
+    return joinpath(path,filename)
+end
+
+function save_id_store(path::AbstractString,store::IDStore;filename::AbstractString="ids.bin",)
     mkpath(path)
 
-    id_path=joinpath(path,"ids.bin")
+    id_path=id_store_path(path,filename)
 
     open(id_path,"w") do io
         write(io,ID_STORE_MAGIC_V2)
@@ -93,8 +99,8 @@ function save_id_store(path::AbstractString,store::IDStore)
     return id_path
 end
 
-function load_id_store(path::AbstractString)
-    id_path=joinpath(path,"ids.bin")
+function load_id_store(path::AbstractString;filename::AbstractString="ids.bin",)
+    id_path=id_store_path(path,filename)
     isfile(id_path)||throw(ArgumentError("id file does not exist"))
 
     return open(id_path,"r") do io

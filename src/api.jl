@@ -37,14 +37,38 @@ function validate_database_fast(db::VectorDB)
     length(db.id_store.positions)==count||error("database id positions are misaligned")
     length(db.base_tombstones)==count||error("database tombstones are misaligned")
     validate_delta_store(db.delta_store)
-    0<=db.live_count<=count+length(db.delta_store)||error("database live count is invalid")
+    db.active_segment.store===db.delta_store||error("active segment does not own the database delta store")
+    validate_active_segment_fast(db.active_segment,db.dim,db.revision)
+
+    for segment in db.immutable_segments
+        validate_immutable_segment_fast(segment)
+    end
+
+    if !isempty(db.immutable_segments)
+        primary=first(db.immutable_segments)
+        primary.vector_store===db.vector_store||error("primary segment vector store is detached")
+        primary.metadata_store===db.metadata_store||error("primary segment metadata store is detached")
+        primary.id_store===db.id_store||error("primary segment id store is detached")
+        length(primary.excluded)==length(db.base_tombstones)||error("primary segment exclusions are misaligned")
+    elseif count>0
+        error("database base has no primary segment")
+    end
+
+    additional_count=0
+
+    for segment_index in 2:length(db.immutable_segments)
+        additional_count+=length(db.immutable_segments[segment_index].vector_store)
+    end
+
+    maximum_physical=count+length(db.delta_store)+additional_count
+    0<=db.live_count<=maximum_physical||error("database live count is invalid")
 
     if db.index===nothing
         db.filter_index===nothing||error("database filter index exists without vector index")
         db.index_revision===nothing||error("database index revision exists without vector index")
         db.index_bytes==0||error("database index size exists without vector index")
-        isempty(db.delta_store.id_store.ids)||error("unindexed database has delta records")
-        db.live_count==count||error("unindexed database live count is misaligned")
+        db.segment_mode||isempty(db.delta_store.id_store.ids)||error("unindexed legacy database has delta records")
+        db.segment_mode||db.live_count==count||error("unindexed legacy database live count is misaligned")
     else
         db.filter_index===nothing&&error("database vector index exists without filter index")
         db.index_revision===nothing&&error("database vector index has no revision")
@@ -59,6 +83,11 @@ end
 
 function validate_database(db::VectorDB)
     validate_database_fast(db)
+    validate_active_segment(db.active_segment,db.dim,db.revision)
+
+    for segment in db.immutable_segments
+        validate_immutable_segment(segment)
+    end
 
     if !isempty(db.mutation_history)
         last(db.mutation_history).revision==db.revision||error("mutation history does not reach the current database revision")
@@ -67,7 +96,7 @@ function validate_database(db::VectorDB)
             db.mutation_history[index].revision==db.mutation_history[index-1].revision+UInt64(1)||error("mutation history revisions are not contiguous")
         end
 
-        db.index_revision===nothing||first(db.mutation_history).revision==db.index_revision+UInt64(1)||error("mutation history does not follow the index revision")
+        db.segment_mode||db.index_revision===nothing||first(db.mutation_history).revision==db.index_revision+UInt64(1)||error("mutation history does not follow the index revision")
     end
 
     for(position,id) in enumerate(db.id_store.ids)
@@ -76,10 +105,10 @@ function validate_database(db::VectorDB)
 
     for(position,id) in enumerate(db.delta_store.id_store.ids)
         get(db.delta_store.id_store.positions,id,0)==position||error("delta id positions are misaligned")
-        has_id(db.id_store,id)&&!db.base_tombstones[get_position(db.id_store,id)]&&error("database id exists in base and delta")
+        db.segment_mode||has_id(db.id_store,id)&&!db.base_tombstones[get_position(db.id_store,id)]&&error("database id exists visibly in base and active segment")
     end
 
-    db.live_count==length(db.vector_store)-count(db.base_tombstones)+length(db.delta_store)||error("database live count is misaligned")
+    db.live_count==length(database_visible_ids(db))||error("database live count is misaligned")
 
     return db
 end
@@ -148,6 +177,159 @@ function has_usable_base(db::VectorDB)
     return db.index!==nothing&&db.filter_index!==nothing&&db.index_revision!==nothing
 end
 
+function synchronize_primary_segment!(db::VectorDB;revision_end::UInt64=db.revision,)
+    revision_start=isempty(db.immutable_segments) ? UInt64(0) : first(db.immutable_segments).revision_start
+    id=isempty(db.immutable_segments) ? "base-$(revision_end)" : first(db.immutable_segments).id
+    primary=create_immutable_segment(
+        id,
+        revision_start,
+        revision_end,
+        db.vector_store,
+        db.metadata_store,
+        db.id_store;
+        excluded=copy(db.base_tombstones),
+        index=db.index,
+        filter_index=db.filter_index,
+        build_config=db.build_config,
+        index_bytes=db.index_bytes,
+    )
+
+    if isempty(db.immutable_segments)
+        push!(db.immutable_segments,primary)
+    else
+        db.immutable_segments[1]=primary
+    end
+
+    return db
+end
+
+function synchronize_active_segment!(db::VectorDB)
+    db.active_segment.store=db.delta_store
+    return db
+end
+
+function database_visible_ids(db::VectorDB)
+    seen=Set{Any}()
+    visible=Set{Any}()
+
+    union!(seen,db.active_segment.tombstone_ids)
+
+    for id in db.delta_store.id_store.ids
+        id in seen&&continue
+        push!(seen,id)
+        push!(visible,id)
+    end
+
+    for segment in Iterators.reverse(db.immutable_segments)
+        union!(seen,segment.tombstone_ids)
+
+        for(position,id) in enumerate(segment.id_store.ids)
+            id in seen&&continue
+            push!(seen,id)
+            segment.excluded[position]||push!(visible,id)
+        end
+    end
+
+    return visible
+end
+
+function database_segment_exclusions(db::VectorDB)
+    exclusions=[copy(segment.excluded) for segment in db.immutable_segments]
+    seen=Set{Any}(db.active_segment.tombstone_ids)
+    union!(seen,db.delta_store.id_store.ids)
+
+    for segment_index in reverse(eachindex(db.immutable_segments))
+        segment=db.immutable_segments[segment_index]
+        union!(seen,segment.tombstone_ids)
+        excluded=exclusions[segment_index]
+
+        for(position,id) in enumerate(segment.id_store.ids)
+            if id in seen
+                excluded[position]=true
+            else
+                push!(seen,id)
+            end
+        end
+    end
+
+    return exclusions
+end
+
+function cached_database_segment_exclusions(db::VectorDB)
+    key=(:segment_exclusions,db.revision,length(db.immutable_segments),db.active_segment.id,)
+    lock(db.plan_cache_lock)
+
+    try
+        return get!(db.plan_cache,key) do
+            database_segment_exclusions(db)
+        end
+    finally
+        unlock(db.plan_cache_lock)
+    end
+end
+
+function database_record_location(db::VectorDB,id)
+    if id in db.active_segment.tombstone_ids
+        return nothing
+    end
+
+    if has_delta_id(db.delta_store,id)
+        return(kind=:active,segment_index=0,position=get_position(db.delta_store.id_store,id),)
+    end
+
+    for segment_index in reverse(eachindex(db.immutable_segments))
+        segment=db.immutable_segments[segment_index]
+        id in segment.tombstone_ids&&return nothing
+
+        if has_id(segment.id_store,id)
+            position=get_position(segment.id_store,id)
+            segment.excluded[position]&&return nothing
+            return(kind=:immutable,segment_index=segment_index,position=position,)
+        end
+    end
+
+    return nothing
+end
+
+function enable_database_segment_mode!(db::VectorDB)
+    db.segment_mode||synchronize_primary_segment!(db)
+    synchronize_active_segment!(db)
+    db.segment_mode=true
+    return db
+end
+
+function seal_active_segment_locked!(db::VectorDB)
+    enable_database_segment_mode!(db)
+    active=db.active_segment
+    active_segment_is_empty(active)&&return nothing
+    active.revision_start<=active.revision_end||error("cannot seal an active segment without a revision range")
+    segment=create_immutable_segment(
+        "segment-$(active.revision_start)-$(active.revision_end)-$(time_ns())",
+        active.revision_start,
+        active.revision_end,
+        active.store.vector_store,
+        active.store.metadata_store,
+        active.store.id_store;
+        tombstone_ids=copy(active.tombstone_ids),
+        filter_index=build_bitset_index(stored_metadata(active.store.metadata_store)),
+    )
+    push!(db.immutable_segments,segment)
+    reset_active_segment!(active,db.dim,db.revision)
+    db.delta_store=active.store
+    clear_plan_cache!(db)
+    validate_database(db)
+    return segment
+end
+
+function seal_active_segment!(db::VectorDB)
+    return with_database_write(db.database_lock) do
+        validate_database(db)
+        segment=seal_active_segment_locked!(db)
+        segment===nothing||schedule_segment_indexing_locked!(db)
+        return segment
+    end
+end
+
 function logical_length(db::VectorDB)
     return db.live_count
 end
@@ -156,7 +338,49 @@ function delta_search_work(db::VectorDB)
     return length(db.delta_store)
 end
 
+function active_put_growth(db::VectorDB,ids::AbstractVector)
+    return count(ids) do id
+        !has_delta_id(db.delta_store,id)&&!(id in db.active_segment.tombstone_ids)
+    end
+end
+
+function active_delete_growth(db::VectorDB,ids::AbstractVector)
+    return count(ids) do id
+        location=database_record_location(db,id)
+        location!==nothing&&location.kind===:immutable
+    end
+end
+
+function seal_and_schedule_active_segment_locked!(db::VectorDB)
+    segment=seal_active_segment_locked!(db)
+    segment===nothing||schedule_segment_indexing_locked!(db)
+    return segment
+end
+
+function ensure_active_segment_capacity_locked!(db::VectorDB,ids::AbstractVector,operation::Symbol)
+    operation in (:put,:delete)||throw(ArgumentError("unsupported active segment operation"))
+    limit=db.maintenance_config.active_segment_threshold
+    growth=operation===:put ? active_put_growth(db,ids) : active_delete_growth(db,ids)
+    active_segment_work(db.active_segment)+growth<=limit&&return db
+    length(ids)<=limit||throw(ArgumentError("mutation would exceed the configured active segment threshold"))
+    active_segment_is_empty(db.active_segment)||seal_and_schedule_active_segment_locked!(db)
+    post_seal_growth=length(ids)
+    post_seal_growth<=limit||throw(ArgumentError("mutation would exceed the configured active segment threshold"))
+    return db
+end
+
+function maybe_seal_active_segment_locked!(db::VectorDB)
+    db.segment_mode||return nothing
+    active_segment_work(db.active_segment)>=db.maintenance_config.active_segment_threshold||return nothing
+    return seal_and_schedule_active_segment_locked!(db)
+end
+
 function ensure_delta_search_capacity!(db::VectorDB,ids::AbstractVector)
+    if db.segment_mode
+        ensure_active_segment_capacity_locked!(db,ids,:put)
+        return db
+    end
+
     has_usable_base(db)||return db
     limit=db.maintenance_config.max_delta_search_records
     additions=count(id->!has_delta_id(db.delta_store,id),ids)
@@ -169,9 +393,7 @@ function ensure_delta_search_capacity!(db::VectorDB,ids::AbstractVector)
 end
 
 function has_database_id(db::VectorDB,id)
-    has_delta_id(db.delta_store,id)&&return true
-    has_id(db.id_store,id)||return false
-    return !db.base_tombstones[get_position(db.id_store,id)]
+    return database_record_location(db,id)!==nothing
 end
 
 function next_database_id(db::VectorDB)
@@ -193,8 +415,14 @@ end
 function finish_database_mutation!(db::VectorDB,revision::UInt64,wal_body::Vector{UInt8})
     revision==next_database_revision(db)||error("database mutation revision is invalid")
     db.revision=revision
+    if db.segment_mode
+        mark_active_segment_revision!(db.active_segment,revision)
+    else
+        synchronize_primary_segment!(db;revision_end=revision,)
+    end
     record_database_mutation!(db,revision,wal_body)
     clear_plan_cache!(db)
+    maybe_seal_active_segment_locked!(db)
     validate_database_fast(db)
     maybe_checkpoint_database!(db)
     maybe_schedule_database_maintenance!(db)
@@ -202,23 +430,26 @@ function finish_database_mutation!(db::VectorDB,revision::UInt64,wal_body::Vecto
 end
 
 function database_mutation_state(db::VectorDB)
-    return(
-        vector_store=deepcopy(db.vector_store),
-        metadata_store=deepcopy(db.metadata_store),
-        id_store=deepcopy(db.id_store),
-        index=deepcopy(db.index),
-        filter_index=deepcopy(db.filter_index),
-        build_config=deepcopy(db.build_config),
+    return deepcopy((
+        vector_store=db.vector_store,
+        metadata_store=db.metadata_store,
+        id_store=db.id_store,
+        index=db.index,
+        filter_index=db.filter_index,
+        build_config=db.build_config,
         revision=db.revision,
         index_revision=db.index_revision,
         index_bytes=db.index_bytes,
-        delta_store=deepcopy(db.delta_store),
-        base_tombstones=copy(db.base_tombstones),
+        delta_store=db.delta_store,
+        base_tombstones=db.base_tombstones,
+        immutable_segments=db.immutable_segments,
+        active_segment=db.active_segment,
+        segment_mode=db.segment_mode,
         live_count=db.live_count,
-        mutation_history=deepcopy(db.mutation_history),
+        mutation_history=db.mutation_history,
         wal_revision=db.wal_revision,
         wal_checkpoint_revision=db.wal_checkpoint_revision,
-    )
+    ))
 end
 
 function install_database_mutation_state!(db::VectorDB,state)
@@ -234,6 +465,9 @@ function install_database_mutation_state!(db::VectorDB,state)
     db.index_bytes=state.index_bytes
     db.delta_store=state.delta_store
     db.base_tombstones=state.base_tombstones
+    db.immutable_segments=state.immutable_segments
+    db.active_segment=state.active_segment
+    db.segment_mode=state.segment_mode
     db.live_count=state.live_count
     db.mutation_history=state.mutation_history
     db.wal_revision=state.wal_revision
@@ -304,7 +538,7 @@ function Base.insert!(db::VectorDB,vector::AbstractVector{<:Real},metadata::Name
         ensure_delta_search_capacity!(db,[resolved_id])
         revision=next_database_revision(db)
         wal_body=database_wal_put_body(revision,[converted],[metadata],[resolved_id])
-        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
+        db.segment_mode||has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
         return commit_database_mutation!(db,revision,wal_body) do
             insert_database_record!(db,converted,metadata,resolved_id)
@@ -352,7 +586,8 @@ function prepare_database_batch(db::VectorDB,vectors::AbstractMatrix,metadata::A
 end
 
 function insert_database_record!(db::VectorDB,vector::AbstractVector{<:Real},metadata::NamedTuple,id)
-    if has_usable_base(db)
+    if db.segment_mode||has_usable_base(db)
+        delete!(db.active_segment.tombstone_ids,id)
         insert_delta!(db.delta_store,vector,metadata,id)
     else
         make_vector_store_writable!(db.vector_store)
@@ -367,18 +602,19 @@ function insert_database_record!(db::VectorDB,vector::AbstractVector{<:Real},met
 end
 
 function update_database_record!(db::VectorDB,id,vector::AbstractVector{<:Real},metadata::NamedTuple)
-    if has_delta_id(db.delta_store,id)
-        update_delta!(db.delta_store,id;vector=vector,metadata=metadata,)
-    elseif has_id(db.id_store,id)&&!db.base_tombstones[get_position(db.id_store,id)]
-        position=get_position(db.id_store,id)
+    location=database_record_location(db,id)
 
-        if has_usable_base(db)
-            tombstone_base_id!(db,id)
-            insert_delta!(db.delta_store,vector,metadata,id)
-        else
+    if location!==nothing&&location.kind===:active
+        update_delta!(db.delta_store,id;vector=vector,metadata=metadata,)
+    elseif location!==nothing&&location.kind===:immutable
+        if !db.segment_mode&&location.segment_index==1
             make_vector_store_writable!(db.vector_store)
-            update_vector!(db.vector_store,position,vector)
-            update_metadata!(db.metadata_store,position,metadata)
+            update_vector!(db.vector_store,location.position,vector)
+            update_metadata!(db.metadata_store,location.position,metadata)
+        else
+            location.segment_index==1&&tombstone_base_id!(db,id)
+            delete!(db.active_segment.tombstone_ids,id)
+            insert_delta!(db.delta_store,vector,metadata,id)
         end
     else
         insert_database_record!(db,vector,metadata,id)
@@ -395,24 +631,25 @@ function swap_delete_tombstone!(tombstones::BitVector,position::Int)
 end
 
 function delete_database_record!(db::VectorDB,id)
-    if has_delta_id(db.delta_store,id)
+    location=database_record_location(db,id)
+    location===nothing&&throw(KeyError(id))
+
+    if location.kind===:active
         delete_delta!(db.delta_store,id)
+        db.segment_mode&&push!(db.active_segment.tombstone_ids,id)
         return db
     end
 
-    has_id(db.id_store,id)||throw(KeyError(id))
-    position=get_position(db.id_store,id)
-    db.base_tombstones[position]&&throw(KeyError(id))
-
-    if has_usable_base(db)
-        db.base_tombstones[position]=true
+    if db.segment_mode
+        location.segment_index==1&&(db.base_tombstones[location.position]=true)
+        push!(db.active_segment.tombstone_ids,id)
     else
         make_vector_store_writable!(db.vector_store)
-        swap_delete_vector!(db.vector_store,position)
-        swap_delete_metadata!(db.metadata_store,position)
+        swap_delete_vector!(db.vector_store,location.position)
+        swap_delete_metadata!(db.metadata_store,location.position)
         deleted=swap_delete_id!(db.id_store,id)
-        deleted.position==position||error("database stores are misaligned")
-        swap_delete_tombstone!(db.base_tombstones,position)
+        deleted.position==location.position||error("database stores are misaligned")
+        swap_delete_tombstone!(db.base_tombstones,location.position)
     end
 
     return db
@@ -427,7 +664,7 @@ function Base.insert!(db::VectorDB,vectors::AbstractMatrix,metadata::AbstractVec
         revision=next_database_revision(db)
         wal_vectors=[@view batch.vectors[:,index] for index in 1:batch.count]
         wal_body=database_wal_put_body(revision,wal_vectors,batch.metadata,batch.ids)
-        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
+        db.segment_mode||has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
         return commit_database_mutation!(db,revision,wal_body) do
             for index in 1:batch.count
@@ -450,7 +687,7 @@ function upsert!(db::VectorDB,vector::AbstractVector{<:Real},metadata::NamedTupl
         ensure_delta_search_capacity!(db,[id])
         revision=next_database_revision(db)
         wal_body=database_wal_put_body(revision,[converted],[metadata],[id])
-        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
+        db.segment_mode||has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
         return commit_database_mutation!(db,revision,wal_body) do
             update_database_record!(db,id,converted,metadata)
@@ -471,7 +708,7 @@ function upsert!(db::VectorDB,vectors::AbstractMatrix,metadata::AbstractVector{<
         revision=next_database_revision(db)
         wal_vectors=[@view batch.vectors[:,index] for index in 1:batch.count]
         wal_body=database_wal_put_body(revision,wal_vectors,batch.metadata,batch.ids)
-        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
+        db.segment_mode||has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
         return commit_database_mutation!(db,revision,wal_body) do
             for index in 1:batch.count
@@ -503,7 +740,7 @@ function update!(db::VectorDB,id;vector::Union{Nothing,AbstractVector{<:Real}}=n
         ensure_delta_search_capacity!(db,[id])
         revision=next_database_revision(db)
         wal_body=database_wal_put_body(revision,[resolved_vector],[resolved_metadata],[id])
-        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
+        db.segment_mode||has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
         return commit_database_mutation!(db,revision,wal_body) do
             update_database_record!(db,id,resolved_vector,resolved_metadata)
@@ -517,9 +754,10 @@ function Base.delete!(db::VectorDB,id)
     return with_database_write(db.database_lock) do
         validate_database_fast(db)
         has_database_id(db,id)||throw(KeyError(id))
+        db.segment_mode&&ensure_active_segment_capacity_locked!(db,[id],:delete)
         revision=next_database_revision(db)
         wal_body=database_wal_delete_body(revision,[id])
-        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
+        db.segment_mode||has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
         return commit_database_mutation!(db,revision,wal_body) do
             delete_database_record!(db,id)
@@ -541,9 +779,12 @@ function Base.delete!(db::VectorDB,ids::AbstractVector)
             has_database_id(db,id)||throw(KeyError(id))
         end
 
+
+        db.segment_mode&&ensure_active_segment_capacity_locked!(db,resolved_ids,:delete)
+
         revision=next_database_revision(db)
         wal_body=database_wal_delete_body(revision,resolved_ids)
-        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
+        db.segment_mode||has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
         return commit_database_mutation!(db,revision,wal_body) do
             for id in resolved_ids
@@ -558,8 +799,11 @@ function Base.delete!(db::VectorDB,ids::AbstractVector)
 end
 
 function get_database_record(db::VectorDB,id)
-    if has_delta_id(db.delta_store,id)
-        position=get_position(db.delta_store.id_store,id)
+    location=database_record_location(db,id)
+    location===nothing&&throw(KeyError(id))
+
+    if location.kind===:active
+        position=location.position
         return(
             id=get_id(db.delta_store.id_store,position),
             vector=collect(get_vector(db.delta_store.vector_store,position)),
@@ -567,13 +811,12 @@ function get_database_record(db::VectorDB,id)
         )
     end
 
-    has_id(db.id_store,id)||throw(KeyError(id))
-    position=get_position(db.id_store,id)
-    db.base_tombstones[position]&&throw(KeyError(id))
+    segment=db.immutable_segments[location.segment_index]
+    position=location.position
     return(
-        id=get_id(db.id_store,position),
-        vector=collect(get_vector(db.vector_store,position)),
-        metadata=get_metadata(db.metadata_store,position),
+        id=get_id(segment.id_store,position),
+        vector=collect(get_vector(segment.vector_store,position)),
+        metadata=get_metadata(segment.metadata_store,position),
     )
 end
 
@@ -590,11 +833,17 @@ function materialize_database(db::VectorDB)
     metadata_store=create_metadata_store(initial_capacity=count,)
     id_store=create_id_store(initial_capacity=count,)
 
-    for position in 1:length(db.vector_store)
-        db.base_tombstones[position]&&continue
-        insert_vector!(vector_store,get_vector(db.vector_store,position))
-        insert_metadata!(metadata_store,get_metadata(db.metadata_store,position))
-        insert_id!(id_store,get_id(db.id_store,position))
+    exclusions=database_segment_exclusions(db)
+
+    for(segment_index,segment) in enumerate(db.immutable_segments)
+        excluded=exclusions[segment_index]
+
+        for position in 1:length(segment.vector_store)
+            excluded[position]&&continue
+            insert_vector!(vector_store,get_vector(segment.vector_store,position))
+            insert_metadata!(metadata_store,get_metadata(segment.metadata_store,position))
+            insert_id!(id_store,get_id(segment.id_store,position))
+        end
     end
 
     for position in 1:length(db.delta_store)
@@ -697,6 +946,9 @@ function install_database_index!(db::VectorDB,built)
         db.index_bytes=candidate.index_bytes
         db.delta_store=candidate.delta_store
         db.base_tombstones=candidate.base_tombstones
+        db.immutable_segments=candidate.immutable_segments
+        db.active_segment=candidate.active_segment
+        db.segment_mode=true
         db.live_count=candidate.live_count
         db.mutation_history=candidate.mutation_history
         old_vector_store===db.vector_store||release_vector_store_mapping!(old_vector_store)
@@ -767,51 +1019,103 @@ function merge_database_search_results(base_results::Vector{SearchResult},delta_
     return results
 end
 
+function search_immutable_segment_raw(segment::ImmutableSegment,query::AbstractVector{<:Real},plan;k::Int,nprobe::Union{Nothing,Int},filter::Union{Nothing,FilterExpr},postfilter_oversample::Int,adaptive_postfilter::Bool,adaptive::Bool,max_nprobe::Union{Nothing,Int},candidate_multiplier::Float64,postfilter_candidate_multiplier::Float64,vector_weight::Float64,filter_weight::Float64,rerank_factor::Int,metric::Symbol,excluded::BitVector,)
+    vectors=stored_vectors(segment.vector_store)
+    metadata=stored_metadata(segment.metadata_store)
+    index=segment.index
+
+    if index===nothing||plan===nothing||plan.strategy isa ExactStrategy||plan.strategy isa PreFilterExactStrategy
+        vector_norms=index===nothing ? nothing : index.ivf.vector_norms
+        return search_exact(vectors,metadata,query;k=k,metric=metric,filter=filter,filter_index=segment.filter_index,vector_norms=vector_norms,excluded=excluded,)
+    end
+
+    list_count=length(index.ivf.lists)
+    resolved_nprobe=min(list_count,nprobe===nothing ? max(1,plan.nprobe) : nprobe)
+    resolved_minimum_nprobe=min(list_count,nprobe===nothing ? max(1,plan.minimum_nprobe) : nprobe)
+    resolved_max_nprobe=max_nprobe===nothing ? resolved_nprobe : clamp(max_nprobe,resolved_nprobe,list_count)
+
+    if plan.strategy isa IVFStrategy
+        return search_ivf(index.ivf,vectors,metadata,query;k=k,nprobe=resolved_nprobe,metric=metric,excluded=excluded,)
+    elseif plan.strategy isa IVFPreFilterStrategy
+        return search_ivf_prefilter(index,vectors,metadata,query;k=k,nprobe=resolved_nprobe,metric=metric,filter=filter,excluded=excluded,)
+    elseif plan.strategy isa IVFPostFilterStrategy
+        resolved_oversample=adaptive_postfilter ? resolve_postfilter_oversample(postfilter_oversample,plan.selectivity;candidate_multiplier=postfilter_candidate_multiplier,) : postfilter_oversample
+        return search_ivf_postfilter(index.ivf,vectors,metadata,query;k=k,nprobe=resolved_nprobe,metric=metric,filter=filter,oversample=resolved_oversample,excluded=excluded,)
+    elseif plan.strategy isa BoundedFilterAwareIVFStrategy
+        return search_filter_aware_bound(index,vectors,metadata,query;k=k,minimum_nprobe=resolved_minimum_nprobe,max_nprobe=resolved_max_nprobe,metric=metric,filter=filter,excluded=excluded,)
+    end
+
+    minimum_nprobe=adaptive ? resolved_minimum_nprobe : resolved_nprobe
+    return search_filter_aware_ivf(index,vectors,metadata,query;k=k,nprobe=minimum_nprobe,metric=metric,filter=filter,adaptive=adaptive,max_nprobe=resolved_max_nprobe,candidate_multiplier=candidate_multiplier,vector_weight=vector_weight,filter_weight=filter_weight,rerank_factor=rerank_factor,excluded=excluded,)
+end
+
 function search_database_locked(db::VectorDB,query::AbstractVector{<:Real};k::Int=10,nprobe::Union{Nothing,Int}=nothing,filter::Union{Nothing,FilterExpr}=nothing,strategy::Symbol=:auto,planner_config::PlannerConfig=PlannerConfig(),postfilter_oversample::Int=10,adaptive_postfilter::Bool=true,adaptive::Bool=true,max_nprobe::Union{Nothing,Int}=nothing,candidate_multiplier::Float64=planner_config.candidate_multiplier,postfilter_candidate_multiplier::Float64=planner_config.postfilter_candidate_multiplier,vector_weight::Float64=0.5,filter_weight::Float64=0.5,rerank_factor::Int=4,_plan::Union{Nothing,QueryPlan}=nothing,)
     length(query)==db.dim||throw(DimensionMismatch("query dimension doesnt match database"))
     k>0||throw(ArgumentError("k must be positive"))
     strategy===:auto||strategy_from_symbol(filter,strategy)
-    base_vectors=stored_vectors(db.vector_store)
-    base_metadata=stored_metadata(db.metadata_store)
+    exclusions=length(db.immutable_segments)>1 ? cached_database_segment_exclusions(db) : nothing
     index=db.index
+    merged=SearchResult[]
+    offset=0
+    plan=nothing
 
     if index===nothing
         strategy in (:auto,:exact)||throw(ArgumentError("search strategy $(strategy) requires a built index"))
-        raw_results=search_exact(base_vectors,base_metadata,query;k=k,metric=db.metric,filter=filter,)
-        return database_search_results(raw_results,db.id_store)
-    end
-
-    plan=_plan===nothing ? (strategy===:auto ? cached_plan_query(db,filter;k=k,config=planner_config,) : plan_query(db,filter;k=k,strategy=strategy,config=planner_config,)) : _plan
-    resolved_minimum_nprobe=nprobe===nothing ? max(1,plan.minimum_nprobe) : nprobe
-    resolved_nprobe=nprobe===nothing ? max(1,plan.nprobe) : nprobe
-    list_count=length(index.ivf.lists)
-    1<=resolved_nprobe<=list_count||throw(ArgumentError("nprobe must be between 1 and list count"))
-    resolved_max_nprobe=max_nprobe===nothing ? resolved_nprobe : max_nprobe
-    resolved_max_nprobe=clamp(resolved_max_nprobe,resolved_nprobe,list_count)
-
-    raw_results=if plan.strategy isa ExactStrategy||plan.strategy isa PreFilterExactStrategy
-        search_exact(base_vectors,base_metadata,query;k=k,metric=db.metric,filter=filter,filter_index=db.filter_index,vector_norms=index.ivf.vector_norms,excluded=db.base_tombstones,)
-    elseif plan.strategy isa IVFStrategy
-        search_ivf(index.ivf,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,excluded=db.base_tombstones,)
-    elseif plan.strategy isa IVFPreFilterStrategy
-        search_ivf_prefilter(index,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,filter=filter,excluded=db.base_tombstones,)
-    elseif plan.strategy isa IVFPostFilterStrategy
-        resolved_oversample=adaptive_postfilter ? resolve_postfilter_oversample(postfilter_oversample,plan.selectivity;candidate_multiplier=postfilter_candidate_multiplier,) : postfilter_oversample
-        search_ivf_postfilter(index.ivf,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,filter=filter,oversample=resolved_oversample,excluded=db.base_tombstones,)
-    elseif plan.strategy isa BoundedFilterAwareIVFStrategy
-        search_filter_aware_bound(index,base_vectors,base_metadata,query;k=k,minimum_nprobe=resolved_minimum_nprobe,max_nprobe=resolved_max_nprobe,metric=db.metric,filter=filter,excluded=db.base_tombstones,)
     else
-        minimum_nprobe=adaptive ? resolved_minimum_nprobe : resolved_nprobe
-        search_filter_aware_ivf(index,base_vectors,base_metadata,query;k=k,nprobe=minimum_nprobe,metric=db.metric,filter=filter,adaptive=adaptive,max_nprobe=resolved_max_nprobe,candidate_multiplier=candidate_multiplier,vector_weight=vector_weight,filter_weight=filter_weight,rerank_factor=rerank_factor,excluded=db.base_tombstones,)
+        plan=_plan===nothing ? (strategy===:auto ? cached_plan_query(db,filter;k=k,config=planner_config,) : plan_query(db,filter;k=k,strategy=strategy,config=planner_config,)) : _plan
+        resolved_minimum_nprobe=nprobe===nothing ? max(1,plan.minimum_nprobe) : nprobe
+        resolved_nprobe=nprobe===nothing ? max(1,plan.nprobe) : nprobe
+        list_count=length(index.ivf.lists)
+        1<=resolved_nprobe<=list_count||throw(ArgumentError("nprobe must be between 1 and list count"))
+        resolved_max_nprobe=max_nprobe===nothing ? resolved_nprobe : max_nprobe
+        resolved_max_nprobe=clamp(resolved_max_nprobe,resolved_nprobe,list_count)
+        base_vectors=stored_vectors(db.vector_store)
+        base_metadata=stored_metadata(db.metadata_store)
+        primary_excluded=exclusions===nothing ? db.base_tombstones : first(exclusions)
+
+        raw_results=if plan.strategy isa ExactStrategy||plan.strategy isa PreFilterExactStrategy
+            search_exact(base_vectors,base_metadata,query;k=k,metric=db.metric,filter=filter,filter_index=db.filter_index,vector_norms=index.ivf.vector_norms,excluded=primary_excluded,)
+        elseif plan.strategy isa IVFStrategy
+            search_ivf(index.ivf,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,excluded=primary_excluded,)
+        elseif plan.strategy isa IVFPreFilterStrategy
+            search_ivf_prefilter(index,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,filter=filter,excluded=primary_excluded,)
+        elseif plan.strategy isa IVFPostFilterStrategy
+            resolved_oversample=adaptive_postfilter ? resolve_postfilter_oversample(postfilter_oversample,plan.selectivity;candidate_multiplier=postfilter_candidate_multiplier,) : postfilter_oversample
+            search_ivf_postfilter(index.ivf,base_vectors,base_metadata,query;k=k,nprobe=resolved_nprobe,metric=db.metric,filter=filter,oversample=resolved_oversample,excluded=primary_excluded,)
+        elseif plan.strategy isa BoundedFilterAwareIVFStrategy
+            search_filter_aware_bound(index,base_vectors,base_metadata,query;k=k,minimum_nprobe=resolved_minimum_nprobe,max_nprobe=resolved_max_nprobe,metric=db.metric,filter=filter,excluded=primary_excluded,)
+        else
+            minimum_nprobe=adaptive ? resolved_minimum_nprobe : resolved_nprobe
+            search_filter_aware_ivf(index,base_vectors,base_metadata,query;k=k,nprobe=minimum_nprobe,metric=db.metric,filter=filter,adaptive=adaptive,max_nprobe=resolved_max_nprobe,candidate_multiplier=candidate_multiplier,vector_weight=vector_weight,filter_weight=filter_weight,rerank_factor=rerank_factor,excluded=primary_excluded,)
+        end
+
+        merged=database_search_results(raw_results,db.id_store)
+        offset=length(db.vector_store)
     end
 
-    base_results=database_search_results(raw_results,db.id_store)
+    first_extra=index===nothing ? 1 : 2
+
+    for segment_index in first_extra:length(db.immutable_segments)
+        segment=db.immutable_segments[segment_index]
+        segment_excluded=if exclusions===nothing
+            segment_index==1||error("segment exclusion table is incomplete")
+            db.base_tombstones
+        else
+            segment_index<=length(exclusions)||error("segment exclusion table is incomplete")
+            exclusions[segment_index]
+        end
+        raw=search_immutable_segment_raw(segment,query,plan;k=k,nprobe=nprobe,filter=filter,postfilter_oversample=postfilter_oversample,adaptive_postfilter=adaptive_postfilter,adaptive=adaptive,max_nprobe=max_nprobe,candidate_multiplier=candidate_multiplier,postfilter_candidate_multiplier=postfilter_candidate_multiplier,vector_weight=vector_weight,filter_weight=filter_weight,rerank_factor=rerank_factor,metric=db.metric,excluded=segment_excluded,)
+        results=database_search_results(raw,segment.id_store;index_offset=offset,)
+        merged=merge_database_search_results(merged,results,k)
+        offset+=length(segment.vector_store)
+    end
+
     delta_vectors=stored_vectors(db.delta_store.vector_store)
     delta_metadata=stored_metadata(db.delta_store.metadata_store)
     length(delta_metadata)<=db.maintenance_config.max_delta_search_records||error("delta search work exceeds the configured bound")
     delta_raw=search_exact(delta_vectors,delta_metadata,query;k=k,metric=db.metric,filter=filter,)
-    delta_results=database_search_results(delta_raw,db.delta_store.id_store;index_offset=length(db.vector_store),)
-    return merge_database_search_results(base_results,delta_results,k)
+    delta_results=database_search_results(delta_raw,db.delta_store.id_store;index_offset=offset,)
+    return merge_database_search_results(merged,delta_results,k)
 end
 
 function search(db::VectorDB,query::AbstractVector{<:Real};filter::Union{Nothing,NamedTuple,FilterExpr}=nothing,kwargs...)
@@ -889,6 +1193,7 @@ end
 
 function use_exact_batch_search(db::VectorDB,filter::Union{Nothing,FilterExpr},plan,kwargs)
     filter===nothing||return false
+    length(db.immutable_segments)<=1||return false
     haskey(kwargs,:nprobe)&&return false
     haskey(kwargs,:max_nprobe)&&return false
     strategy=get(kwargs,:strategy,:auto)
@@ -998,6 +1303,7 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
             save_metadata_store(snapshot.temporary_path,stores.metadata_store)
             save_id_store(snapshot.temporary_path,stores.id_store)
             current_index&&save_ivf_index(snapshot.temporary_path,db.index.ivf)
+            save_database_segments(snapshot.temporary_path,db)
             seal_database_snapshot(snapshot.temporary_path,db.revision)
             maybe_pause_database_process!(:after_snapshot_seal,db.path)
             commit_database_snapshot(db.path,snapshot)
@@ -1011,6 +1317,28 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
         prune_database_snapshots(db.path;retain=retain_snapshots,)
         return db
     end
+end
+
+function install_loaded_database_segments!(db::VectorDB,topology)
+    old_vector_store=db.vector_store
+    db.immutable_segments=topology.immutable_segments
+    primary=first(db.immutable_segments)
+    db.vector_store=primary.vector_store
+    db.metadata_store=primary.metadata_store
+    db.id_store=primary.id_store
+    db.base_tombstones=copy(primary.excluded)
+    db.index=primary.index
+    db.filter_index=primary.index===nothing ? nothing : primary.filter_index
+    db.build_config=primary.build_config
+    db.index_revision=topology.index_revision
+    db.index_bytes=primary.index===nothing ? 0 : primary.index_bytes
+    db.active_segment=topology.active_segment
+    db.delta_store=db.active_segment.store
+    db.segment_mode=true
+    db.base_tombstones=first(database_segment_exclusions(db))
+    old_vector_store===db.vector_store||release_vector_store_mapping!(old_vector_store)
+    clear_plan_cache!(db)
+    return db
 end
 
 function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::Bool=false,checkpoint_operations::Int=10_000,checkpoint_bytes::Int=64*1024*1024,checkpoint_retain_snapshots::Int=2,maintenance_config::MaintenanceConfig=MaintenanceConfig(),mmap_vectors::Union{Bool,Symbol}=:auto,mmap_threshold_bytes::Int=DEFAULT_VECTOR_MMAP_THRESHOLD_BYTES,)
@@ -1048,7 +1376,11 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
         maintenance_config=maintenance_config,
     )
 
-    if manifest.index_revision==manifest.revision&&isfile(index_file_path(snapshot_path))
+    topology=load_database_segments(snapshot_path,manifest.dim,manifest.metric,manifest.revision;mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
+
+    if topology!==nothing
+        install_loaded_database_segments!(db,topology)
+    elseif manifest.index_revision==manifest.revision&&isfile(index_file_path(snapshot_path))
         ivf=load_ivf_index(snapshot_path)
         size(ivf.centroids,1)==manifest.dim||throw(DimensionMismatch("stored index dimension doesnt match manifest"))
         manifest.nlists===nothing||length(ivf.lists)==manifest.nlists||throw(DimensionMismatch("stored list count doesnt match manifest"))
@@ -1058,13 +1390,18 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
         db.filter_index=build_bitset_index(stored_metadata(metadata_store))
         db.index_revision=manifest.index_revision
         db.index_bytes=database_index_bytes(db.index,db.filter_index)
-    elseif rebuild&&manifest.build_config!==nothing
-        config=manifest.build_config
-        build!(db;nlists=config.nlists,iterations=config.iterations,seed=config.seed,restarts=config.restarts,training_count=min(length(db),max(config.nlists,config.training_count)),)
     end
 
     replay_database_wal!(db)
+
+    if rebuild&&!is_built(db)&&db.build_config!==nothing&&length(db)>0
+        config=db.build_config
+        nlists=min(config.nlists,length(db))
+        build!(db;nlists=nlists,iterations=config.iterations,seed=config.seed,restarts=config.restarts,training_count=min(length(db),max(nlists,config.training_count)),)
+    end
+
     ensure_delta_search_capacity!(db,Any[])
+    db.segment_mode&&active_segment_work(db.active_segment)>=db.maintenance_config.active_segment_threshold&&seal_active_segment_locked!(db)
     validate_database(db)
     return db
 end
@@ -1095,6 +1432,7 @@ function load_db_from_wal(path::AbstractString;checkpoint_operations::Int=10_000
     )
     replay_database_wal!(db)
     ensure_delta_search_capacity!(db,Any[])
+    db.segment_mode&&active_segment_work(db.active_segment)>=db.maintenance_config.active_segment_threshold&&seal_active_segment_locked!(db)
     validate_database(db)
     return db
 end
@@ -1143,6 +1481,7 @@ function load_db(path::AbstractString;iterations::Int=20,seed::Int=42,rebuild::B
         db=load_db_without_writer_lock(path;iterations=iterations,seed=seed,rebuild=rebuild,recover=recover,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
         attach_database_writer_lock!(db,io)
         maybe_schedule_database_maintenance!(db)
+        maybe_schedule_segment_indexing!(db)
         return db
     catch
         release_database_writer_lock(io)

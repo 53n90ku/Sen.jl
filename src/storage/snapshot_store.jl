@@ -159,6 +159,7 @@ function write_database_current(path::AbstractString,generation::AbstractString)
         ccall(:fsync,Cint,(Cint,),fd(io))==0||error("failed to sync database current pointer")
     end
 
+    maybe_inject_database_storage_fault!(:current_pointer)
     Base.rename(pointer_temporary,database_current_path(path))
     fsync_path(path)
     return database_current_path(path)
@@ -166,6 +167,7 @@ end
 
 function commit_database_snapshot(path::AbstractString,snapshot)
     validate_database_snapshot(snapshot.temporary_path;allow_legacy=false,)
+    maybe_inject_database_storage_fault!(:snapshot_commit)
     generation=validate_snapshot_generation(snapshot.generation)
     final_path=joinpath(database_snapshot_root(path),generation)
     ispath(final_path)&&throw(ArgumentError("database snapshot already exists"))

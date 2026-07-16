@@ -3,9 +3,18 @@ using Random
 function normalize_columns!(vectors::AbstractMatrix)
     for index in axes(vectors,2)
         vector=@view vectors[:,index]
-        norm=sqrt(sum(abs2,vector))
+        norm_squared=zero(typeof(abs2(zero(eltype(vector)))))
+
+        for dimension in eachindex(vector)
+            norm_squared+=abs2(vector[dimension])
+        end
+
+        norm=sqrt(norm_squared)
         norm>0||throw(ArgumentError("vector cannot be zero"))
-        vector./=norm
+
+        for dimension in eachindex(vector)
+            vector[dimension]/=norm
+        end
     end
 
     return vectors

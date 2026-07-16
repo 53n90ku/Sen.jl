@@ -91,6 +91,19 @@ function is_mapped(store::VectorStore)
     return store.mapped
 end
 
+function make_vector_store_writable!(store::VectorStore)
+    store.mapped||return store
+    vectors=Matrix{Float32}(undef,store.dim,store.count)
+
+    if store.count>0
+        copyto!(vectors,stored_vectors(store))
+    end
+
+    store.vectors=vectors
+    store.mapped=false
+    return store
+end
+
 function release_vector_store_mapping!(store::VectorStore)
     store.mapped||return store
     store.vectors=Matrix{Float32}(undef,store.dim,0)

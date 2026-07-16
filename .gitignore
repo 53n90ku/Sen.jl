@@ -2,7 +2,7 @@
 !README.md
 /roadmap.md
 docs/
-test/
+/benchmark/SenBench/test/
 Manifest.toml
 experiments/*.bin
 results/*/raw_results.tsv

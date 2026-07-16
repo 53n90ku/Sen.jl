@@ -27,6 +27,8 @@ function database_info(db::VectorDB)
                 db.live_count,
                 counts.base_count,
                 counts.delta_count,
+                counts.delta_search_work,
+                counts.delta_search_limit,
                 counts.tombstone_count,
                 counts.delta_ratio,
                 counts.tombstone_ratio,

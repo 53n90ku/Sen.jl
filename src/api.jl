@@ -60,6 +60,16 @@ end
 function validate_database(db::VectorDB)
     validate_database_fast(db)
 
+    if !isempty(db.mutation_history)
+        last(db.mutation_history).revision==db.revision||error("mutation history does not reach the current database revision")
+
+        for index in 2:length(db.mutation_history)
+            db.mutation_history[index].revision==db.mutation_history[index-1].revision+UInt64(1)||error("mutation history revisions are not contiguous")
+        end
+
+        db.index_revision===nothing||first(db.mutation_history).revision==db.index_revision+UInt64(1)||error("mutation history does not follow the index revision")
+    end
+
     for(position,id) in enumerate(db.id_store.ids)
         get(db.id_store.positions,id,0)==position||error("database id positions are misaligned")
     end
@@ -77,6 +87,49 @@ end
 function next_database_revision(db::VectorDB)
     db.revision==typemax(UInt64)&&error("database revision overflow")
     return db.revision+UInt64(1)
+end
+
+const DATABASE_MUTATION_FAULT_KEY=:sen_database_mutation_fault
+const DATABASE_MUTATION_FAULT_STAGES=(:before_wal,:after_wal,:during_apply,:after_apply,)
+
+struct InjectedDatabaseMutationError <: Exception
+    stage::Symbol
+end
+
+struct DatabaseMutationCommittedError <: Exception
+    revision::UInt64
+    cause::Exception
+end
+
+function Base.showerror(io::IO,error::InjectedDatabaseMutationError)
+    print(io,"injected database mutation failure at ",error.stage)
+end
+
+function Base.showerror(io::IO,error::DatabaseMutationCommittedError)
+    print(io,"database mutation revision ",error.revision," committed durably but its in-memory application failed: ")
+    showerror(io,error.cause)
+end
+
+function inject_database_mutation_fault!(stage::Symbol)
+    stage in DATABASE_MUTATION_FAULT_STAGES||throw(ArgumentError("unsupported database mutation fault stage"))
+    task_local_storage()[DATABASE_MUTATION_FAULT_KEY]=stage
+    return stage
+end
+
+function clear_database_mutation_fault!()
+    storage=task_local_storage()
+    haskey(storage,DATABASE_MUTATION_FAULT_KEY)&&delete!(storage,DATABASE_MUTATION_FAULT_KEY)
+    return nothing
+end
+
+function database_mutation_fault_stage()
+    return get(task_local_storage(),DATABASE_MUTATION_FAULT_KEY,nothing)
+end
+
+function maybe_inject_database_mutation_fault!(stage::Symbol)
+    database_mutation_fault_stage()===stage||return nothing
+    clear_database_mutation_fault!()
+    throw(InjectedDatabaseMutationError(stage))
 end
 
 function clear_plan_cache!(db::VectorDB)
@@ -97,6 +150,22 @@ end
 
 function logical_length(db::VectorDB)
     return db.live_count
+end
+
+function delta_search_work(db::VectorDB)
+    return length(db.delta_store)
+end
+
+function ensure_delta_search_capacity!(db::VectorDB,ids::AbstractVector)
+    has_usable_base(db)||return db
+    limit=db.maintenance_config.max_delta_search_records
+    additions=count(id->!has_delta_id(db.delta_store,id),ids)
+    delta_search_work(db)+additions<=limit&&return db
+    length(ids)<=limit||throw(ArgumentError("mutation would exceed the configured delta search bound"))
+    rebuild_database_maintenance!(db)
+    isempty(db.delta_store.id_store.ids)||error("foreground delta compaction did not clear the mutation tail")
+    length(ids)<=limit||error("mutation exceeds the configured delta search bound after compaction")
+    return db
 end
 
 function has_database_id(db::VectorDB,id)
@@ -121,14 +190,96 @@ function tombstone_base_id!(db::VectorDB,id)
     return position
 end
 
-function finish_database_mutation!(db::VectorDB,revision::UInt64)
+function finish_database_mutation!(db::VectorDB,revision::UInt64,wal_body::Vector{UInt8})
     revision==next_database_revision(db)||error("database mutation revision is invalid")
     db.revision=revision
+    record_database_mutation!(db,revision,wal_body)
     clear_plan_cache!(db)
     validate_database_fast(db)
     maybe_checkpoint_database!(db)
     maybe_schedule_database_maintenance!(db)
     return db
+end
+
+function database_mutation_state(db::VectorDB)
+    return(
+        vector_store=deepcopy(db.vector_store),
+        metadata_store=deepcopy(db.metadata_store),
+        id_store=deepcopy(db.id_store),
+        index=deepcopy(db.index),
+        filter_index=deepcopy(db.filter_index),
+        build_config=deepcopy(db.build_config),
+        revision=db.revision,
+        index_revision=db.index_revision,
+        index_bytes=db.index_bytes,
+        delta_store=deepcopy(db.delta_store),
+        base_tombstones=copy(db.base_tombstones),
+        live_count=db.live_count,
+        mutation_history=deepcopy(db.mutation_history),
+        wal_revision=db.wal_revision,
+        wal_checkpoint_revision=db.wal_checkpoint_revision,
+    )
+end
+
+function install_database_mutation_state!(db::VectorDB,state)
+    old_vector_store=db.vector_store
+    db.vector_store=state.vector_store
+    db.metadata_store=state.metadata_store
+    db.id_store=state.id_store
+    db.index=state.index
+    db.filter_index=state.filter_index
+    db.build_config=state.build_config
+    db.revision=state.revision
+    db.index_revision=state.index_revision
+    db.index_bytes=state.index_bytes
+    db.delta_store=state.delta_store
+    db.base_tombstones=state.base_tombstones
+    db.live_count=state.live_count
+    db.mutation_history=state.mutation_history
+    db.wal_revision=state.wal_revision
+    db.wal_checkpoint_revision=state.wal_checkpoint_revision
+    old_vector_store===db.vector_store||release_vector_store_mapping!(old_vector_store)
+    clear_plan_cache!(db)
+    validate_database(db)
+    return db
+end
+
+function recover_committed_database_mutation!(db::VectorDB)
+    recovered=load_db_without_writer_lock(
+        db.path;
+        rebuild=false,
+        recover=true,
+        checkpoint_operations=db.checkpoint_operations,
+        checkpoint_bytes=db.checkpoint_bytes,
+        checkpoint_retain_snapshots=db.checkpoint_retain_snapshots,
+        maintenance_config=db.maintenance_config,
+        mmap_vectors=false,
+    )
+    return install_database_mutation_state!(db,database_mutation_state(recovered))
+end
+
+function commit_database_mutation!(apply::Function,db::VectorDB,revision::UInt64,wal_body::Vector{UInt8})
+    maybe_inject_database_mutation_fault!(:before_wal)
+    durable=append_database_wal_body_if_active!(db,revision,wal_body)
+    fault_stage=database_mutation_fault_stage()
+    backup=!durable&&fault_stage in (:during_apply,:after_apply,) ? database_mutation_state(db) : nothing
+
+    try
+        maybe_inject_database_mutation_fault!(:after_wal)
+        result=apply()
+        maybe_inject_database_mutation_fault!(:after_apply)
+        finish_database_mutation!(db,revision,wal_body)
+        return result
+    catch error
+        if durable
+            recover_committed_database_mutation!(db)
+            throw(DatabaseMutationCommittedError(revision,error))
+        elseif backup!==nothing
+            install_database_mutation_state!(db,backup)
+        end
+
+        rethrow()
+    end
 end
 
 function is_built(db::VectorDB)
@@ -146,35 +297,28 @@ end
 function Base.insert!(db::VectorDB,vector::AbstractVector{<:Real},metadata::NamedTuple;id=nothing,)
     return with_database_write(db.database_lock) do
         validate_database_fast(db)
-        length(vector)==db.dim||throw(DimensionMismatch("vector dimension doesnt match database"))
-        converted=Float32[value for value in vector]
+        converted=convert_validated_vector(vector,db.dim,db.metric)
         resolved_id=id===nothing ? next_database_id(db) : id
         resolved_id===nothing&&throw(ArgumentError("id cannot be nothing"))
         has_database_id(db,resolved_id)&&throw(ArgumentError("id already exists"))
+        ensure_delta_search_capacity!(db,[resolved_id])
         revision=next_database_revision(db)
-        append_database_wal_put!(db,revision,[converted],[metadata],[resolved_id])
+        wal_body=database_wal_put_body(revision,[converted],[metadata],[resolved_id])
+        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
-        if has_usable_base(db)
-            insert_delta!(db.delta_store,converted,metadata,resolved_id)
-        else
-            vector_position=insert_vector!(db.vector_store,converted)
-            metadata_position=insert_metadata!(db.metadata_store,metadata)
-            id_position=insert_id!(db.id_store,resolved_id)
-            vector_position==metadata_position==id_position||error("database stores are misaligned")
-            push!(db.base_tombstones,false)
+        return commit_database_mutation!(db,revision,wal_body) do
+            insert_database_record!(db,converted,metadata,resolved_id)
+            maybe_inject_database_mutation_fault!(:during_apply)
+            db.live_count+=1
+            return resolved_id
         end
-
-        db.live_count+=1
-        finish_database_mutation!(db,revision)
-        return resolved_id
     end
 end
 
 function prepare_database_batch(db::VectorDB,vectors::AbstractMatrix,metadata::AbstractVector{<:NamedTuple},ids;allow_existing::Bool,)
-    dim,count=size(vectors)
-    dim==db.dim||throw(DimensionMismatch("vector dimensions dont match database"))
+    _,count=size(vectors)
     length(metadata)==count||throw(DimensionMismatch("metadata count doesnt match vector count"))
-    converted=Matrix{Float32}(vectors)
+    converted=convert_validated_vectors(vectors,db.dim,db.metric)
     converted_metadata=NamedTuple[value for value in metadata]
     resolved_ids=if ids===nothing
         generated=Vector{Any}(undef,count)
@@ -211,6 +355,7 @@ function insert_database_record!(db::VectorDB,vector::AbstractVector{<:Real},met
     if has_usable_base(db)
         insert_delta!(db.delta_store,vector,metadata,id)
     else
+        make_vector_store_writable!(db.vector_store)
         vector_position=insert_vector!(db.vector_store,vector)
         metadata_position=insert_metadata!(db.metadata_store,metadata)
         id_position=insert_id!(db.id_store,id)
@@ -231,6 +376,7 @@ function update_database_record!(db::VectorDB,id,vector::AbstractVector{<:Real},
             tombstone_base_id!(db,id)
             insert_delta!(db.delta_store,vector,metadata,id)
         else
+            make_vector_store_writable!(db.vector_store)
             update_vector!(db.vector_store,position,vector)
             update_metadata!(db.metadata_store,position,metadata)
         end
@@ -261,6 +407,7 @@ function delete_database_record!(db::VectorDB,id)
     if has_usable_base(db)
         db.base_tombstones[position]=true
     else
+        make_vector_store_writable!(db.vector_store)
         swap_delete_vector!(db.vector_store,position)
         swap_delete_metadata!(db.metadata_store,position)
         deleted=swap_delete_id!(db.id_store,id)
@@ -276,17 +423,21 @@ function Base.insert!(db::VectorDB,vectors::AbstractMatrix,metadata::AbstractVec
         validate_database_fast(db)
         batch=prepare_database_batch(db,vectors,metadata,ids;allow_existing=false,)
         batch.count==0&&return batch.ids
+        ensure_delta_search_capacity!(db,batch.ids)
         revision=next_database_revision(db)
         wal_vectors=[@view batch.vectors[:,index] for index in 1:batch.count]
-        append_database_wal_put!(db,revision,wal_vectors,batch.metadata,batch.ids)
+        wal_body=database_wal_put_body(revision,wal_vectors,batch.metadata,batch.ids)
+        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
-        for index in 1:batch.count
-            insert_database_record!(db,@view(batch.vectors[:,index]),batch.metadata[index],batch.ids[index])
+        return commit_database_mutation!(db,revision,wal_body) do
+            for index in 1:batch.count
+                insert_database_record!(db,@view(batch.vectors[:,index]),batch.metadata[index],batch.ids[index])
+                maybe_inject_database_mutation_fault!(:during_apply)
+            end
+
+            db.live_count+=batch.count
+            return batch.ids
         end
-
-        db.live_count+=batch.count
-        finish_database_mutation!(db,revision)
-        return batch.ids
     end
 end
 
@@ -294,16 +445,19 @@ function upsert!(db::VectorDB,vector::AbstractVector{<:Real},metadata::NamedTupl
     return with_database_write(db.database_lock) do
         validate_database_fast(db)
         id===nothing&&throw(ArgumentError("id cannot be nothing"))
-        length(vector)==db.dim||throw(DimensionMismatch("vector dimension doesnt match database"))
-        converted=Float32[value for value in vector]
+        converted=convert_validated_vector(vector,db.dim,db.metric)
         existing=has_database_id(db,id)
+        ensure_delta_search_capacity!(db,[id])
         revision=next_database_revision(db)
-        append_database_wal_put!(db,revision,[converted],[metadata],[id])
+        wal_body=database_wal_put_body(revision,[converted],[metadata],[id])
+        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
-        update_database_record!(db,id,converted,metadata)
-        existing||(db.live_count+=1)
-        finish_database_mutation!(db,revision)
-        return id
+        return commit_database_mutation!(db,revision,wal_body) do
+            update_database_record!(db,id,converted,metadata)
+            maybe_inject_database_mutation_fault!(:during_apply)
+            existing||(db.live_count+=1)
+            return id
+        end
     end
 end
 
@@ -313,18 +467,22 @@ function upsert!(db::VectorDB,vectors::AbstractMatrix,metadata::AbstractVector{<
         batch=prepare_database_batch(db,vectors,metadata,ids;allow_existing=true,)
         batch.count==0&&return batch.ids
         new_count=count(id->!has_database_id(db,id),batch.ids)
+        ensure_delta_search_capacity!(db,batch.ids)
         revision=next_database_revision(db)
         wal_vectors=[@view batch.vectors[:,index] for index in 1:batch.count]
-        append_database_wal_put!(db,revision,wal_vectors,batch.metadata,batch.ids)
+        wal_body=database_wal_put_body(revision,wal_vectors,batch.metadata,batch.ids)
+        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
-        for index in 1:batch.count
-            id=batch.ids[index]
-            update_database_record!(db,id,@view(batch.vectors[:,index]),batch.metadata[index])
+        return commit_database_mutation!(db,revision,wal_body) do
+            for index in 1:batch.count
+                id=batch.ids[index]
+                update_database_record!(db,id,@view(batch.vectors[:,index]),batch.metadata[index])
+                maybe_inject_database_mutation_fault!(:during_apply)
+            end
+
+            db.live_count+=new_count
+            return batch.ids
         end
-
-        db.live_count+=new_count
-        finish_database_mutation!(db,revision)
-        return batch.ids
     end
 end
 
@@ -336,18 +494,22 @@ function update!(db::VectorDB,id;vector::Union{Nothing,AbstractVector{<:Real}}=n
         converted=if vector===nothing
             nothing
         else
-            length(vector)==db.dim||throw(DimensionMismatch("vector dimension doesnt match database"))
-            Float32[value for value in vector]
+            convert_validated_vector(vector,db.dim,db.metric)
         end
 
         current=get_database_record(db,id)
         resolved_vector=converted===nothing ? current.vector : converted
         resolved_metadata=metadata===nothing ? current.metadata : metadata
+        ensure_delta_search_capacity!(db,[id])
         revision=next_database_revision(db)
-        append_database_wal_put!(db,revision,[resolved_vector],[resolved_metadata],[id])
-        update_database_record!(db,id,resolved_vector,resolved_metadata)
-        finish_database_mutation!(db,revision)
-        return db
+        wal_body=database_wal_put_body(revision,[resolved_vector],[resolved_metadata],[id])
+        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
+
+        return commit_database_mutation!(db,revision,wal_body) do
+            update_database_record!(db,id,resolved_vector,resolved_metadata)
+            maybe_inject_database_mutation_fault!(:during_apply)
+            return db
+        end
     end
 end
 
@@ -356,11 +518,15 @@ function Base.delete!(db::VectorDB,id)
         validate_database_fast(db)
         has_database_id(db,id)||throw(KeyError(id))
         revision=next_database_revision(db)
-        append_database_wal_delete!(db,revision,[id])
-        delete_database_record!(db,id)
-        db.live_count-=1
-        finish_database_mutation!(db,revision)
-        return db
+        wal_body=database_wal_delete_body(revision,[id])
+        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
+
+        return commit_database_mutation!(db,revision,wal_body) do
+            delete_database_record!(db,id)
+            maybe_inject_database_mutation_fault!(:during_apply)
+            db.live_count-=1
+            return db
+        end
     end
 end
 
@@ -376,15 +542,18 @@ function Base.delete!(db::VectorDB,ids::AbstractVector)
         end
 
         revision=next_database_revision(db)
-        append_database_wal_delete!(db,revision,resolved_ids)
+        wal_body=database_wal_delete_body(revision,resolved_ids)
+        has_usable_base(db)||make_vector_store_writable!(db.vector_store)
 
-        for id in resolved_ids
-            delete_database_record!(db,id)
+        return commit_database_mutation!(db,revision,wal_body) do
+            for id in resolved_ids
+                delete_database_record!(db,id)
+                maybe_inject_database_mutation_fault!(:during_apply)
+            end
+
+            db.live_count-=length(resolved_ids)
+            return db
         end
-
-        db.live_count-=length(resolved_ids)
-        finish_database_mutation!(db,revision)
-        return db
     end
 end
 
@@ -438,7 +607,7 @@ function materialize_database(db::VectorDB)
     return(vector_store=vector_store,metadata_store=metadata_store,id_store=id_store,)
 end
 
-function build!(db::VectorDB;nlists::Int,iterations::Int=20,seed::Int=42,restarts::Int=1,training_count::Union{Nothing,Int}=nothing,)
+function build!(db::VectorDB;nlists::Int,iterations::Int=20,seed::Int=42,restarts::Int=1,training_count::Union{Nothing,Int}=nothing,_snapshot_hook::Union{Nothing,Function}=nothing,)
     snapshot=with_database_read(db.database_lock) do
         validate_database_fast(db)
         count=logical_length(db)
@@ -448,6 +617,8 @@ function build!(db::VectorDB;nlists::Int,iterations::Int=20,seed::Int=42,restart
         stores=materialize_database(db)
         return(revision=db.revision,config=config,stores=stores,metric=db.metric,)
     end
+
+    _snapshot_hook===nothing||_snapshot_hook(snapshot)
 
     vectors=stored_vectors(snapshot.stores.vector_store)
     metadata=stored_metadata(snapshot.stores.metadata_store)
@@ -459,20 +630,76 @@ function build!(db::VectorDB;nlists::Int,iterations::Int=20,seed::Int=42,restart
     return install_database_index!(db,built)
 end
 
+function database_mutation_tail(db::VectorDB,revision::UInt64)
+    revision<=db.revision||throw(ArgumentError("index build revision is ahead of database"))
+    entries=DatabaseMutationEntry[entry for entry in db.mutation_history if entry.revision>revision]
+    expected=revision
+
+    for entry in entries
+        expected==typemax(UInt64)&&throw(ArgumentError("mutation history revision overflow"))
+        expected+=UInt64(1)
+        entry.revision==expected||throw(ArgumentError("mutation history does not cover the index build tail"))
+    end
+
+    expected==db.revision||throw(ArgumentError("mutation history does not reach the current database revision"))
+    return entries
+end
+
+function rebase_database_index(db::VectorDB,built,entries::Vector{DatabaseMutationEntry})
+    candidate=VectorDB(
+        db.path,
+        db.dim,
+        db.metric,
+        built.stores.vector_store,
+        built.stores.metadata_store,
+        built.stores.id_store,
+        built.index,
+        built.filter_index,
+        built.config,
+        built.revision,
+        built.revision,
+        DatabaseLock(),
+        Dict{Any,Any}(),
+        ReentrantLock();
+        checkpoint_operations=db.checkpoint_operations,
+        checkpoint_bytes=db.checkpoint_bytes,
+        checkpoint_retain_snapshots=db.checkpoint_retain_snapshots,
+        maintenance_config=db.maintenance_config,
+    )
+    candidate.index_bytes=built.index_bytes
+
+    for entry in entries
+        apply_database_wal_record!(candidate,read_database_wal_record(entry.body,db.dim))
+    end
+
+    candidate.revision==db.revision||error("rebased index generation did not reach the current revision")
+    candidate.live_count==db.live_count||error("rebased index generation changed the logical record count")
+    delta_search_work(candidate)<=db.maintenance_config.max_delta_search_records||throw(ArgumentError("rebased index generation exceeds the configured delta search bound"))
+    validate_database(candidate)
+    return candidate
+end
+
 function install_database_index!(db::VectorDB,built)
     return with_database_write(db.database_lock) do
-        db.revision==built.revision||throw(ArgumentError("database changed while index was building"))
-        db.vector_store=built.stores.vector_store
-        db.metadata_store=built.stores.metadata_store
-        db.id_store=built.stores.id_store
-        db.index=built.index
-        db.filter_index=built.filter_index
-        db.build_config=built.config
-        db.index_revision=built.revision
-        db.index_bytes=built.index_bytes
-        db.delta_store=create_delta_store(db.dim)
-        db.base_tombstones=falses(length(db.vector_store))
-        db.live_count=length(db.vector_store)
+        all(property->hasproperty(built,property),(:revision,:config,:stores,:index,:filter_index,:index_bytes,))||throw(ArgumentError("index build generation is incomplete"))
+        built.revision<=db.revision||throw(ArgumentError("index build revision is ahead of database"))
+        db.index_revision!==nothing&&built.revision<db.index_revision&&return db
+        entries=database_mutation_tail(db,built.revision)
+        candidate=rebase_database_index(db,built,entries)
+        old_vector_store=db.vector_store
+        db.vector_store=candidate.vector_store
+        db.metadata_store=candidate.metadata_store
+        db.id_store=candidate.id_store
+        db.index=candidate.index
+        db.filter_index=candidate.filter_index
+        db.build_config=candidate.build_config
+        db.index_revision=candidate.index_revision
+        db.index_bytes=candidate.index_bytes
+        db.delta_store=candidate.delta_store
+        db.base_tombstones=candidate.base_tombstones
+        db.live_count=candidate.live_count
+        db.mutation_history=candidate.mutation_history
+        old_vector_store===db.vector_store||release_vector_store_mapping!(old_vector_store)
         clear_plan_cache!(db)
 
         validate_database(db)
@@ -581,6 +808,7 @@ function search_database_locked(db::VectorDB,query::AbstractVector{<:Real};k::In
     base_results=database_search_results(raw_results,db.id_store)
     delta_vectors=stored_vectors(db.delta_store.vector_store)
     delta_metadata=stored_metadata(db.delta_store.metadata_store)
+    length(delta_metadata)<=db.maintenance_config.max_delta_search_records||error("delta search work exceeds the configured bound")
     delta_raw=search_exact(delta_vectors,delta_metadata,query;k=k,metric=db.metric,filter=filter,)
     delta_results=database_search_results(delta_raw,db.delta_store.id_store;index_offset=length(db.vector_store),)
     return merge_database_search_results(base_results,delta_results,k)
@@ -591,7 +819,8 @@ function search(db::VectorDB,query::AbstractVector{<:Real};filter::Union{Nothing
 
     return with_database_read(db.database_lock) do
         validate_database_fast(db)
-        search_database_locked(db,query;filter=normalized_filter,kwargs...)
+        converted=convert_validated_vector(query,db.dim,db.metric;context="query",)
+        search_database_locked(db,converted;filter=normalized_filter,kwargs...)
     end
 end
 
@@ -645,6 +874,7 @@ function search_database_exact_batch_locked(db::VectorDB,queries::AbstractMatrix
     base_raw=search_exact_batch(base_vectors,base_metadata,queries;k=k,metric=db.metric,vector_norms=vector_norms,excluded=db.index===nothing ? nothing : db.base_tombstones,)
     delta_vectors=stored_vectors(db.delta_store.vector_store)
     delta_metadata=stored_metadata(db.delta_store.metadata_store)
+    length(delta_metadata)<=db.maintenance_config.max_delta_search_records||error("delta search work exceeds the configured bound")
     delta_raw=search_exact_batch(delta_vectors,delta_metadata,queries;k=k,metric=db.metric,)
     results=Vector{Vector{SearchResult}}(undef,size(queries,2))
 
@@ -713,26 +943,26 @@ function search(db::VectorDB,queries::AbstractMatrix{<:Real};filter::Union{Nothi
 
     return with_database_read(db.database_lock) do
         validate_database_fast(db)
-        size(queries,1)==db.dim||throw(DimensionMismatch("query dimensions dont match database"))
-        query_count=size(queries,2)
+        converted=convert_validated_vectors(queries,db.dim,db.metric;context="query",)
+        query_count=size(converted,2)
         results=Vector{Vector{SearchResult}}(undef,query_count)
         worker_count=resolve_database_batch_workers(query_count;parallel=parallel,workers=workers,parallel_threshold=parallel_threshold,)
         query_count==0&&return results
         batch_plan=resolve_database_batch_plan(db,normalized_filter,kwargs)
 
         if use_exact_batch_search(db,normalized_filter,batch_plan,kwargs)
-            return search_database_exact_batch_locked(db,queries;k=get(kwargs,:k,10),)
+            return search_database_exact_batch_locked(db,converted;k=get(kwargs,:k,10),)
         end
 
         if worker_count==1
             for index in 1:query_count
-                results[index]=search_database_locked(db,@view(queries[:,index]);filter=normalized_filter,_plan=batch_plan,kwargs...)
+                results[index]=search_database_locked(db,@view(converted[:,index]);filter=normalized_filter,_plan=batch_plan,kwargs...)
             end
 
             return results
         end
 
-        return search_database_batch_parallel!(results,db,queries,worker_count;filter=normalized_filter,_plan=batch_plan,kwargs...)
+        return search_database_batch_parallel!(results,db,converted,worker_count;filter=normalized_filter,_plan=batch_plan,kwargs...)
     end
 end
 
@@ -769,7 +999,9 @@ function save!(db::VectorDB;retain_snapshots::Int=2,)
             save_id_store(snapshot.temporary_path,stores.id_store)
             current_index&&save_ivf_index(snapshot.temporary_path,db.index.ivf)
             seal_database_snapshot(snapshot.temporary_path,db.revision)
+            maybe_pause_database_process!(:after_snapshot_seal,db.path)
             commit_database_snapshot(db.path,snapshot)
+            maybe_pause_database_process!(:after_snapshot_commit,db.path)
             checkpoint_database_wal!(db)
         catch
             abort_database_snapshot(snapshot)
@@ -793,6 +1025,7 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
     length(vector_store)==manifest.count||throw(DimensionMismatch("stored vector count doesnt match manifest"))
     length(metadata_store)==manifest.count||throw(DimensionMismatch("stored metadata count doesnt match manifest"))
     length(id_store)==manifest.count||throw(DimensionMismatch("stored id count doesnt match manifest"))
+    validate_stored_vectors!(stored_vectors(vector_store),manifest.metric)
 
     db=VectorDB(
         String(path),
@@ -831,6 +1064,7 @@ function load_db_from_snapshot(path::AbstractString,snapshot_path::AbstractStrin
     end
 
     replay_database_wal!(db)
+    ensure_delta_search_capacity!(db,Any[])
     validate_database(db)
     return db
 end
@@ -860,7 +1094,18 @@ function load_db_from_wal(path::AbstractString;checkpoint_operations::Int=10_000
         maintenance_config=maintenance_config,
     )
     replay_database_wal!(db)
+    ensure_delta_search_capacity!(db,Any[])
     validate_database(db)
+    return db
+end
+
+function rebase_recovered_database_wal!(db::VectorDB)
+    checkpoint_revision=db.wal_checkpoint_revision
+    checkpoint_revision===nothing&&return db
+    checkpoint_revision<=db.revision&&return db
+    replace_database_wal(db.path,db.revision,db.dim,db.metric)
+    db.wal_revision=db.revision
+    db.wal_checkpoint_revision=db.revision
     return db
 end
 
@@ -869,19 +1114,25 @@ function load_db_without_writer_lock(path::AbstractString;iterations::Int=20,see
         return load_db_from_wal(path;checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,)
     end
 
+    recovered_snapshot=false
     snapshot_path=try
         current_database_snapshot(path)
     catch
         recover||rethrow()
+        recovered_snapshot=true
         recover_database_snapshot(path)
     end
 
     try
-        return load_db_from_snapshot(path,snapshot_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
+        db=load_db_from_snapshot(path,snapshot_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
+        recovered_snapshot&&rebase_recovered_database_wal!(db)
+        return db
     catch
         recover||rethrow()
         recovered_path=recover_database_snapshot(path)
-        return load_db_from_snapshot(path,recovered_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
+        db=load_db_from_snapshot(path,recovered_path;iterations=iterations,seed=seed,rebuild=rebuild,checkpoint_operations=checkpoint_operations,checkpoint_bytes=checkpoint_bytes,checkpoint_retain_snapshots=checkpoint_retain_snapshots,maintenance_config=maintenance_config,mmap_vectors=mmap_vectors,mmap_threshold_bytes=mmap_threshold_bytes,)
+        rebase_recovered_database_wal!(db)
+        return db
     end
 end
 

@@ -165,12 +165,37 @@ function write_database_wal_delete_body(io::IO,revision::UInt64,ids)
     return io
 end
 
+function database_wal_put_body(revision::UInt64,vectors,metadata,ids)
+    io=IOBuffer()
+    write_database_wal_put_body(io,revision,vectors,metadata,ids)
+    return take!(io)
+end
+
+function database_wal_delete_body(revision::UInt64,ids)
+    io=IOBuffer()
+    write_database_wal_delete_body(io,revision,ids)
+    return take!(io)
+end
+
+function record_database_mutation!(db::VectorDB,revision::UInt64,body::Vector{UInt8})
+    revision==db.revision||throw(ArgumentError("mutation history revision doesnt match database"))
+
+    if !isempty(db.mutation_history)
+        last(db.mutation_history).revision<revision||throw(ArgumentError("mutation history revisions must increase"))
+    end
+
+    push!(db.mutation_history,DatabaseMutationEntry(revision,copy(body)))
+    return db
+end
+
 function append_database_wal_body!(db::VectorDB,revision::UInt64,body::Vector{UInt8})
     length(body)<=DATABASE_WAL_MAX_RECORD_BYTES||throw(ArgumentError("database WAL record is too large"))
     ensure_database_writer_ownership(db)
     wal_path=ensure_database_wal(db)
     revision==next_database_revision(db)||throw(ArgumentError("database WAL append revision is invalid"))
     checksum=sha256(body)
+    maybe_pause_database_process!(:before_wal_append,db.path)
+    maybe_inject_database_storage_fault!(:wal_append)
 
     try
         open(wal_path,"a") do io
@@ -180,6 +205,7 @@ function append_database_wal_body!(db::VectorDB,revision::UInt64,body::Vector{UI
             sync_wal_io(io)
         end
 
+        maybe_pause_database_process!(:after_wal_sync,db.path)
         db.wal_revision=revision
     catch
         db.wal_revision=nothing
@@ -189,18 +215,20 @@ function append_database_wal_body!(db::VectorDB,revision::UInt64,body::Vector{UI
     return wal_path
 end
 
+function append_database_wal_body_if_active!(db::VectorDB,revision::UInt64,body::Vector{UInt8})
+    database_wal_is_active(db)||return false
+    append_database_wal_body!(db,revision,body)
+    return true
+end
+
 function append_database_wal_put!(db::VectorDB,revision::UInt64,vectors,metadata,ids)
-    database_wal_is_active(db)||return nothing
-    io=IOBuffer()
-    write_database_wal_put_body(io,revision,vectors,metadata,ids)
-    return append_database_wal_body!(db,revision,take!(io))
+    body=database_wal_put_body(revision,vectors,metadata,ids)
+    return append_database_wal_body_if_active!(db,revision,body) ? database_wal_path(db.path) : nothing
 end
 
 function append_database_wal_delete!(db::VectorDB,revision::UInt64,ids)
-    database_wal_is_active(db)||return nothing
-    io=IOBuffer()
-    write_database_wal_delete_body(io,revision,ids)
-    return append_database_wal_body!(db,revision,take!(io))
+    body=database_wal_delete_body(revision,ids)
+    return append_database_wal_body_if_active!(db,revision,body) ? database_wal_path(db.path) : nothing
 end
 
 function read_database_wal_record(body::Vector{UInt8},dim::Int)
@@ -306,6 +334,10 @@ function apply_database_wal_record!(db::VectorDB,record::DatabaseWALRecord)
     if record.operation==DATABASE_WAL_PUT
         length(Set{Any}(record.ids))==length(record.ids)||throw(ArgumentError("database WAL put ids must be unique"))
 
+        for(index,vector) in pairs(record.vectors)
+            validate_vector_values!(vector,db.metric,"stored WAL vector $index")
+        end
+
         for index in eachindex(record.ids)
             id=record.ids[index]
             existing=has_database_id(db,id)
@@ -325,6 +357,8 @@ function apply_database_wal_record!(db::VectorDB,record::DatabaseWALRecord)
     end
 
     db.revision=record.revision
+    body=record.operation==DATABASE_WAL_PUT ? database_wal_put_body(record.revision,record.vectors,record.metadata,record.ids) : database_wal_delete_body(record.revision,record.ids)
+    record_database_mutation!(db,record.revision,body)
     clear_plan_cache!(db)
     validate_database_fast(db)
     return db
@@ -352,6 +386,7 @@ function checkpoint_database_wal!(db::VectorDB)
     ensure_database_writer_ownership(db)
 
     try
+        maybe_inject_database_storage_fault!(:wal_checkpoint)
         path=replace_database_wal(db.path,db.revision,db.dim,db.metric)
         db.wal_revision=db.revision
         db.wal_checkpoint_revision=db.revision

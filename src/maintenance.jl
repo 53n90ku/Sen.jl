@@ -6,6 +6,8 @@ function maintenance_counts_locked(db::VectorDB)
     return(
         base_count=base_count,
         delta_count=delta_count,
+        delta_search_work=delta_count,
+        delta_search_limit=db.maintenance_config.max_delta_search_records,
         tombstone_count=tombstone_count,
         delta_ratio=delta_count/denominator,
         tombstone_ratio=tombstone_count/denominator,
@@ -185,7 +187,16 @@ end
 function configure_maintenance!(db::VectorDB,config::MaintenanceConfig)
     with_database_write(db.database_lock) do
         ensure_database_open(db)
+        previous_config=db.maintenance_config
         db.maintenance_config=config
+
+        try
+            ensure_delta_search_capacity!(db,Any[])
+        catch
+            db.maintenance_config=previous_config
+            rethrow()
+        end
+
         state=db.maintenance_state
         lock(state.lock)
 

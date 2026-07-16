@@ -32,5 +32,17 @@ jobs:
         with:
           version: '1.12'
       - uses: julia-actions/cache@v3
+      - name: Validate frozen engine contract
+        run: julia --project=. scripts/validate_engine_contract.jl --enforce
+      - name: Test engine contract validator
+        run: julia --project=. scripts/test_engine_contract.jl
+      - name: Instantiate benchmark environment
+        run: julia --project=benchmark/SenBench -e 'using Pkg; Pkg.instantiate()'
+      - name: Enforce recall and latency contract
+        run: julia --project=benchmark/SenBench scripts/validate_quality_contract.jl
+      - name: Enforce crash recovery contract
+        run: julia --project=. scripts/test_crash_recovery.jl
       - name: Validate release metadata and API
         run: julia --project=. scripts/validate_release.jl --skip-tests
+      - name: Run full package tests
+        run: julia --project=. -e 'using Pkg; Pkg.test()'

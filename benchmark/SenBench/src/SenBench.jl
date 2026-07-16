@@ -44,6 +44,7 @@ include("workloads.jl")
 include("calibration.jl")
 include("protocol.jl")
 include("real_protocol.jl")
+include("quality_contract.jl")
 
 export generate_synthetic_dataset,generate_synthetic_queries
 export generate_clustered_dataset,generate_clustered_queries
@@ -91,5 +92,8 @@ export run_claim_benchmark,experiment_summary_rows,write_tsv,save_experiment_sui
 export experiment_aggregate_rows,claim_aggregate_rows
 export real_experiment_spec,run_real_benchmark,real_benchmark_summary_rows
 export save_real_benchmark,benchmark_qps
+export QualityWorkloadSpec,QualityContract,load_quality_contract
+export generate_quality_dataset,quality_dataset_fingerprint,quality_workload_fingerprint
+export run_quality_workload,validate_quality_contract
 
 end

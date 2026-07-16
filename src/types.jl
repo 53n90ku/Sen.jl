@@ -3,6 +3,7 @@ struct MaintenanceConfig
     minimum_changes::Int
     delta_threshold::Int
     delta_ratio::Float64
+    max_delta_search_records::Int
     tombstone_threshold::Int
     tombstone_ratio::Float64
     max_retries::Int
@@ -10,15 +11,16 @@ struct MaintenanceConfig
     persist_after_rebuild::Bool
 end
 
-function MaintenanceConfig(;enabled::Bool=true,minimum_changes::Int=1_000,delta_threshold::Int=10_000,delta_ratio::Real=0.10,tombstone_threshold::Int=10_000,tombstone_ratio::Real=0.10,max_retries::Int=3,retry_delay_ms::Int=50,persist_after_rebuild::Bool=true,)
+function MaintenanceConfig(;enabled::Bool=true,minimum_changes::Int=1_000,delta_threshold::Int=10_000,delta_ratio::Real=0.10,max_delta_search_records::Int=20_000,tombstone_threshold::Int=10_000,tombstone_ratio::Real=0.10,max_retries::Int=3,retry_delay_ms::Int=50,persist_after_rebuild::Bool=true,)
     minimum_changes>0||throw(ArgumentError("minimum changes must be positive"))
     delta_threshold>=0||throw(ArgumentError("delta threshold cannot be negative"))
     0.0<=delta_ratio<=1.0||throw(ArgumentError("delta ratio must be between zero and one"))
+    max_delta_search_records>0||throw(ArgumentError("max delta search records must be positive"))
     tombstone_threshold>=0||throw(ArgumentError("tombstone threshold cannot be negative"))
     0.0<=tombstone_ratio<=1.0||throw(ArgumentError("tombstone ratio must be between zero and one"))
     max_retries>=0||throw(ArgumentError("max retries cannot be negative"))
     retry_delay_ms>=0||throw(ArgumentError("retry delay cannot be negative"))
-    return MaintenanceConfig(enabled,minimum_changes,delta_threshold,Float64(delta_ratio),tombstone_threshold,Float64(tombstone_ratio),max_retries,retry_delay_ms,persist_after_rebuild)
+    return MaintenanceConfig(enabled,minimum_changes,delta_threshold,Float64(delta_ratio),max_delta_search_records,tombstone_threshold,Float64(tombstone_ratio),max_retries,retry_delay_ms,persist_after_rebuild)
 end
 
 mutable struct MaintenanceState
@@ -38,6 +40,11 @@ function MaintenanceState()
     return MaintenanceState(ReentrantLock(),nothing,:idle,false,false,0,nothing,nothing,0.0,nothing)
 end
 
+struct DatabaseMutationEntry
+    revision::UInt64
+    body::Vector{UInt8}
+end
+
 mutable struct VectorDB
     path::String
     dim::Int
@@ -54,6 +61,7 @@ mutable struct VectorDB
     delta_store::DeltaStore
     base_tombstones::BitVector
     live_count::Int
+    mutation_history::Vector{DatabaseMutationEntry}
     wal_revision::Union{Nothing,UInt64}
     wal_checkpoint_revision::Union{Nothing,UInt64}
     checkpoint_operations::Int
@@ -73,7 +81,7 @@ function VectorDB(path::String,dim::Int,metric::Symbol,vector_store::VectorStore
     checkpoint_bytes>=0||throw(ArgumentError("checkpoint bytes cannot be negative"))
     checkpoint_retain_snapshots>0||throw(ArgumentError("checkpoint retain snapshots must be positive"))
     index_bytes=index===nothing||filter_index===nothing ? 0 : Base.summarysize((index,filter_index,))
-    return VectorDB(path,dim,metric,vector_store,metadata_store,id_store,index,filter_index,build_config,revision,index_revision,index_bytes,create_delta_store(dim),falses(length(vector_store)),length(vector_store),nothing,nothing,checkpoint_operations,checkpoint_bytes,checkpoint_retain_snapshots,nothing,false,database_lock,plan_cache,plan_cache_lock,maintenance_config,MaintenanceState())
+    return VectorDB(path,dim,metric,vector_store,metadata_store,id_store,index,filter_index,build_config,revision,index_revision,index_bytes,create_delta_store(dim),falses(length(vector_store)),length(vector_store),DatabaseMutationEntry[],nothing,nothing,checkpoint_operations,checkpoint_bytes,checkpoint_retain_snapshots,nothing,false,database_lock,plan_cache,plan_cache_lock,maintenance_config,MaintenanceState())
 end
 
 struct SearchResult
@@ -91,6 +99,8 @@ struct DatabaseInfo
     live_count::Int
     base_count::Int
     delta_count::Int
+    delta_search_work::Int
+    delta_search_limit::Int
     tombstone_count::Int
     delta_ratio::Float64
     tombstone_ratio::Float64

@@ -32,6 +32,10 @@ jobs:
         with:
           version: '1.12'
       - uses: julia-actions/cache@v3
+      - name: Enforce Julia formatting
+        run: |
+          julia --project=formatter -e 'using Pkg; Pkg.instantiate()'
+          julia --project=formatter scripts/check_format.jl
       - name: Validate frozen engine contract
         run: julia --project=. scripts/validate_engine_contract.jl --enforce
       - name: Test engine contract validator

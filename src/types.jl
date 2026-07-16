@@ -1,3 +1,11 @@
+"""
+    MaintenanceConfig(; kwargs...)
+
+Configure background segment sealing, compaction, indexing, retry behavior and
+the maximum unindexed records searched per query. Set `enabled=false` to keep
+maintenance manual and `segment_compaction_threshold=0` to disable automatic
+segment compaction.
+"""
 struct MaintenanceConfig
     enabled::Bool
     minimum_changes::Int
@@ -135,6 +143,13 @@ struct DatabaseMutationEntry
     body::Vector{UInt8}
 end
 
+"""
+    VectorDB
+
+An open embedded Sen database. Create one with [`create_db`](@ref), reopen it
+with [`load_db`](@ref), and release its writer lock and mapped storage with
+`close(db)`.
+"""
 mutable struct VectorDB
     path::String
     dim::Int
@@ -264,6 +279,12 @@ function VectorDB(
     )
 end
 
+"""
+    SearchResult
+
+A ranked search hit containing its user ID, physical position, similarity
+`score`, and stored metadata.
+"""
 struct SearchResult
     id::Any
     index::Int

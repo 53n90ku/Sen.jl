@@ -16,7 +16,7 @@ title = "Exact and approximate filtered search"
 requirement = "Exact top-k, IVF approximate top-k, metadata filtering, and deterministic result merging are implemented and tested."
 status = "pass"
 stage = 0
-evidence = ["test/test_exact.jl", "test/test_ivf.jl", "test/test_expression_exact_ivf.jl"]
+evidence = ["test/search/test_exact.jl", "test/search/test_ivf.jl", "test/filters/test_expression_exact_ivf.jl"]
 verification = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
 [[gates]]
@@ -25,7 +25,7 @@ title = "Durable acknowledged mutations"
 requirement = "Acknowledged mutations survive normal restart and supported WAL crash boundaries."
 status = "pass"
 stage = 0
-evidence = ["test/test_wal.jl", "test/test_database_persistence.jl", "src/storage/wal_store.jl"]
+evidence = ["test/persistence/test_wal.jl", "test/persistence/test_database_persistence.jl", "src/storage/wal_store.jl"]
 verification = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
 [[gates]]
@@ -34,7 +34,7 @@ title = "Logical mutation visibility"
 requirement = "Insert, upsert, update, and delete operations remain visible to exact and indexed searches before and after persistence."
 status = "pass"
 stage = 0
-evidence = ["test/test_mutations.jl", "test/test_delta.jl"]
+evidence = ["test/mutations/test_mutations.jl", "test/mutations/test_delta.jl"]
 verification = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
 [[gates]]
@@ -43,7 +43,7 @@ title = "Safe vector admission"
 requirement = "Every accepted vector and query is finite, Float32-representable, dimensionally valid, and nonzero when required by the metric."
 status = "pass"
 stage = 1
-evidence = ["src/vector_validation.jl", "src/api.jl", "test/test_api.jl"]
+evidence = ["src/vector_validation.jl", "src/api.jl", "test/core/test_api.jl"]
 verification = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
 [[gates]]
@@ -52,7 +52,7 @@ title = "Writable databases remain writable after reopen"
 requirement = "A saved database reopened with any supported mmap mode accepts insert, upsert, update, and delete operations."
 status = "pass"
 stage = 1
-evidence = ["src/storage/vector_store.jl", "test/test_database_persistence.jl"]
+evidence = ["src/storage/vector_store.jl", "test/persistence/test_database_persistence.jl"]
 verification = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
 [[gates]]
@@ -61,7 +61,7 @@ title = "Exception-safe atomic mutations"
 requirement = "Validation or injected failures cannot leave WAL, vectors, metadata, IDs, revisions, or indexes in a partially committed state."
 status = "pass"
 stage = 1
-evidence = ["src/api.jl", "src/storage/wal_store.jl", "test/test_wal.jl"]
+evidence = ["src/api.jl", "src/storage/wal_store.jl", "test/persistence/test_wal.jl"]
 verification = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
 [[gates]]
@@ -70,7 +70,7 @@ title = "Indexing completes under continuous writes"
 requirement = "Background index construction can publish a valid generation while newer acknowledged writes remain searchable."
 status = "pass"
 stage = 2
-evidence = ["src/api.jl", "src/maintenance.jl", "src/types.jl", "test/test_maintenance.jl"]
+evidence = ["src/api.jl", "src/maintenance.jl", "src/types.jl", "test/maintenance/test_maintenance.jl"]
 verification = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
 [[gates]]
@@ -79,7 +79,7 @@ title = "Mutation search cost is bounded"
 requirement = "Unindexed mutation work per query is bounded by configuration and does not grow without limit between successful background indexing operations."
 status = "pass"
 stage = 2
-evidence = ["src/api.jl", "src/storage/delta_store.jl", "src/observability.jl", "test/test_maintenance.jl", "test/test_database_info.jl"]
+evidence = ["src/api.jl", "src/storage/delta_store.jl", "src/observability.jl", "test/maintenance/test_maintenance.jl", "test/core/test_database_info.jl"]
 verification = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
 [[gates]]
@@ -88,7 +88,7 @@ title = "Measured recall and latency contract"
 requirement = "Each approximate strategy has held-out recall and latency gates keyed by metric, dimension, index version, and workload, including unfiltered search."
 status = "pass"
 stage = 3
-evidence = ["quality_contract.toml", "benchmark/SenBench/src/quality_contract.jl", "scripts/validate_quality_contract.jl", "test/test_protocol.jl"]
+evidence = ["quality_contract.toml", "benchmark/SenBench/src/quality_contract.jl", "scripts/validate_quality_contract.jl", "benchmark/SenBench/test/cases/test_protocol.jl"]
 verification = "julia --project=benchmark/SenBench scripts/validate_quality_contract.jl"
 
 [[gates]]
@@ -97,7 +97,7 @@ title = "Fault-injected crash recovery"
 requirement = "A mutation killed before WAL append may be absent; after WAL fsync it must survive. Recovery remains writable across process termination, truncated writes, corrupted snapshots, disk-full failures, and checkpoint boundaries."
 status = "pass"
 stage = 3
-evidence = ["src/storage/fault_injection.jl", "scripts/crash_worker.jl", "scripts/test_crash_recovery.jl", "test/test_database_persistence.jl"]
+evidence = ["src/storage/fault_injection.jl", "scripts/crash_worker.jl", "scripts/test_crash_recovery.jl", "test/persistence/test_database_persistence.jl"]
 verification = "julia --project=. scripts/test_crash_recovery.jl"
 
 [[gates]]

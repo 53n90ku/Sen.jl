@@ -2,6 +2,13 @@ const MAX_FILTER_DEPTH=64
 const MAX_FILTER_NODES=4_096
 const MAX_FILTER_IN_VALUES=4_096
 
+"""
+    FilterExpr
+
+Abstract supertype for metadata predicates accepted by [`search`](@ref).
+Compose predicates with [`Eq`](@ref), [`In`](@ref), [`Range`](@ref),
+[`And`](@ref), [`Or`](@ref), and [`Not`](@ref).
+"""
 abstract type FilterExpr end
 
 function freeze_filter_value(value)
@@ -28,6 +35,11 @@ function filter_value_hash(value, seed::UInt)
     return hash(value, seed)
 end
 
+"""
+    Eq(field, value)
+
+Match records whose metadata `field` equals `value`.
+"""
 struct Eq{T} <: FilterExpr
     field::Symbol
     value::T
@@ -64,6 +76,11 @@ function freeze_in_values(values)
     return Tuple(frozen)
 end
 
+"""
+    In(field, values)
+
+Match records whose metadata `field` equals any value in `values`.
+"""
 struct In{T<:Tuple} <: FilterExpr
     field::Symbol
     values::T
@@ -112,6 +129,12 @@ function validate_range_bounds(lower, upper)
     return lower, upper
 end
 
+"""
+    Range(field, lower, upper)
+
+Match records whose numeric, `Date`, or `DateTime` metadata value lies in the
+inclusive interval from `lower` to `upper`.
+"""
 struct Range{L,U} <: FilterExpr
     field::Symbol
     lower::L
@@ -129,6 +152,11 @@ end
 
 Range(field, lower, upper) = throw(ArgumentError("filter field must be a Symbol"))
 
+"""
+    And(filters...)
+
+Match records satisfying every child filter.
+"""
 struct And{T<:Tuple} <: FilterExpr
     children::T
 
@@ -142,6 +170,11 @@ end
 
 And(children::FilterExpr...) = And(children)
 
+"""
+    Or(filters...)
+
+Match records satisfying at least one child filter.
+"""
 struct Or{T<:Tuple} <: FilterExpr
     children::T
 
@@ -155,6 +188,11 @@ end
 
 Or(children::FilterExpr...) = Or(children)
 
+"""
+    Not(filter)
+
+Match records that do not satisfy `filter`.
+"""
 struct Not{T<:FilterExpr} <: FilterExpr
     child::T
 end

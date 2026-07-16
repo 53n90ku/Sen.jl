@@ -102,7 +102,9 @@ function validate_gate(root::AbstractString, gate::AbstractDict, index::Int)
     if status=="pass"
         require_contract(
             any(
-                path->startswith(path, "test/")||startswith(path, "scripts/test_"),
+                path->startswith(path, "test/") ||
+                      occursin("/test/", path) ||
+                      startswith(path, "scripts/test_"),
                 evidence_paths,
             ),
             "$(context) cannot pass without executable test evidence",

@@ -6,7 +6,8 @@ end
     database_info(db)
 
 Return a consistent immutable snapshot of database, index, durability and
-background-maintenance state.
+background-maintenance state, including logical counts, index memory, revisions
+and WAL checkpoint progress.
 """
 function database_info(db::VectorDB)
     return with_database_read(db.database_lock) do

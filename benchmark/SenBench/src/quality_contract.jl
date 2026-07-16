@@ -446,6 +446,7 @@ function run_quality_workload(
 
     try
         insert!(db, data.vectors, data.metadata; ids = collect(1:spec.vector_count))
+        build_started=time_ns()
         build!(
             db;
             nlists = spec.nlists,
@@ -454,6 +455,8 @@ function run_quality_workload(
             restarts = 1,
             training_count = spec.vector_count,
         )
+        build_ms=(time_ns()-build_started)/1_000_000
+        index_bytes=database_info(db).index_bytes
         train_truth=quality_truth(db, data.train_queries, spec, data.filter)
         heldout_truth=quality_truth(db, data.heldout_queries, spec, data.filter)
         results=NamedTuple[]
@@ -497,6 +500,11 @@ function run_quality_workload(
             metric = spec.metric,
             filter_workload = spec.filter_workload,
             index_version = contract.index_version,
+            vector_count = spec.vector_count,
+            dimension = spec.dimension,
+            nlists = spec.nlists,
+            build_ms = build_ms,
+            index_bytes = index_bytes,
             dataset_sha256 = dataset_sha256,
             workload_sha256 = workload_sha256,
             target_recall = spec.target_recall,

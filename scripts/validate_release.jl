@@ -88,6 +88,12 @@ require_release(stable_api()===STABLE_API_V1, "stable api identity is invalid")
 for name in stable_api()
     require_release(isdefined(Sen, name), "stable api symbol $(name) is missing")
     require_release(Base.isexported(Sen, name), "stable api symbol $(name) is not exported")
+    value=getfield(Sen, name)
+    binding=Base.Docs.Binding(parentmodule(value), nameof(value))
+    require_release(
+        haskey(Base.Docs.meta(Sen), binding),
+        "stable api symbol $(name) is undocumented",
+    )
 end
 
 println("release metadata passed for Sen $(version)")

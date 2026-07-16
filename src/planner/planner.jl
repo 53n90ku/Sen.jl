@@ -261,6 +261,13 @@ function strategy_from_symbol(filter::Union{Nothing,FilterExpr}, strategy::Symbo
     throw(ArgumentError("unknown search strategy"))
 end
 
+"""
+    plan_query(db, filter=nothing; k=10, strategy=:auto, config=PlannerConfig())
+
+Return Sen's immutable query plan without executing the search. The plan
+includes the selected strategy, estimated candidates and probe range, costs,
+and a human-readable selection reason.
+"""
 function plan_query(
     db::VectorDB,
     filter::Union{Nothing,NamedTuple,FilterExpr};

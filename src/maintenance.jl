@@ -581,6 +581,12 @@ function stop_segment_indexing!(db::VectorDB)
     return db
 end
 
+"""
+    configure_maintenance!(db, config)
+
+Replace the live maintenance configuration, validate bounded mutation-search
+capacity, and start or stop eligible background work.
+"""
 function configure_maintenance!(db::VectorDB, config::MaintenanceConfig)
     with_database_write(db.database_lock) do
         ensure_database_open(db)
@@ -622,6 +628,12 @@ function configure_maintenance!(db::VectorDB, config::MaintenanceConfig)
     return db
 end
 
+"""
+    maintenance_status(db)
+
+Return a `NamedTuple` describing segment counts, bounded mutation-search work,
+revisions, pending maintenance, attempts, duration and the last error.
+"""
 function maintenance_status(db::VectorDB)
     database=with_database_read(db.database_lock) do
         counts=maintenance_counts_locked(db)
@@ -657,6 +669,12 @@ function maintenance_status(db::VectorDB)
     end
 end
 
+"""
+    wait_for_maintenance(db; timeout=60.0)
+
+Wait until scheduled maintenance becomes idle, completed, failed or stopped,
+and return the final [`maintenance_status`](@ref).
+"""
 function wait_for_maintenance(db::VectorDB; timeout::Real = 60.0)
     timeout>0||throw(ArgumentError("timeout must be positive"))
     deadline=time()+timeout

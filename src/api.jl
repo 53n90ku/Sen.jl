@@ -1,3 +1,16 @@
+"""
+    create_db(path; dim, metric=:cosine, durable=true, kwargs...)
+
+Create an empty embedded vector database at `path`. `metric` may be `:cosine`
+or `:dot`. Durable databases own a single-writer lock and append acknowledged
+mutations to a WAL; pass `durable=false` for an in-memory database.
+
+Example:
+
+```julia
+db = create_db("documents.sen"; dim=384, metric=:cosine)
+```
+"""
 function create_db(
     path::AbstractString;
     dim::Int,
@@ -689,18 +702,42 @@ function commit_database_mutation!(
     end
 end
 
+"""
+    is_built(db)
+
+Return `true` when the installed index covers the current database revision.
+"""
 function is_built(db::VectorDB)
     return with_database_read(db.database_lock) do
         has_usable_base(db)&&db.index_revision==db.revision
     end
 end
 
+"""
+    is_dirty(db)
+
+Return `true` when mutations are newer than the installed index generation.
+Dirty records remain searchable through Sen's bounded mutation path.
+"""
 function is_dirty(db::VectorDB)
     return with_database_read(db.database_lock) do
         db.revision>0&&(db.index_revision===nothing||db.index_revision!=db.revision)
     end
 end
 
+"""
+    insert!(db, vector, metadata; id=nothing)
+    insert!(db, vectors, metadata; ids=nothing)
+
+Insert one vector or a column-major matrix of vectors with `NamedTuple`
+metadata. IDs are generated when omitted and returned to the caller.
+
+Example:
+
+```julia
+id = insert!(db, embedding, (title="Exoplanet Detection",); id="doc-1")
+```
+"""
 function Base.insert!(
     db::VectorDB,
     vector::AbstractVector{<:Real},
@@ -895,6 +932,13 @@ function Base.insert!(
     end
 end
 
+"""
+    upsert!(db, vector, metadata; id)
+    upsert!(db, vectors, metadata; ids)
+
+Insert records whose IDs are absent and replace the vector and metadata for
+IDs that already exist.
+"""
 function upsert!(db::VectorDB, vector::AbstractVector{<:Real}, metadata::NamedTuple; id)
     return with_database_write(db.database_lock) do
         validate_database_fast(db)
@@ -950,6 +994,11 @@ function upsert!(
     end
 end
 
+"""
+    update!(db, id; vector=nothing, metadata=nothing)
+
+Replace the vector, metadata, or both for an existing record.
+"""
 function update!(
     db::VectorDB,
     id;
@@ -989,6 +1038,12 @@ function update!(
     end
 end
 
+"""
+    delete!(db, id)
+    delete!(db, ids)
+
+Delete one record or an atomic batch of records by ID.
+"""
 function Base.delete!(db::VectorDB, id)
     return with_database_write(db.database_lock) do
         validate_database_fast(db)
@@ -1061,6 +1116,12 @@ function get_database_record(db::VectorDB, id)
     )
 end
 
+"""
+    get_record(db, id)
+
+Return `(id, vector, metadata)` for a visible record, or throw `KeyError` when
+the ID does not exist.
+"""
 function get_record(db::VectorDB, id)
     return with_database_read(db.database_lock) do
         validate_database_fast(db)
@@ -1104,6 +1165,18 @@ function materialize_database(db::VectorDB)
     )
 end
 
+"""
+    build!(db; nlists, iterations=20, seed=42, restarts=1, training_count=nothing)
+
+Build and atomically install a filter-aware IVF index. Concurrent committed
+mutations are rebased onto the new index generation and remain searchable.
+
+Example:
+
+```julia
+build!(db; nlists=64, iterations=20, seed=42)
+```
+"""
 function build!(
     db::VectorDB;
     nlists::Int,
@@ -1269,6 +1342,11 @@ function install_database_index!(db::VectorDB, built)
     end
 end
 
+"""
+    rebuild!(db)
+
+Rebuild the database using its most recently installed index configuration.
+"""
 function rebuild!(db::VectorDB)
     config=with_database_read(db.database_lock) do
         db.build_config===nothing&&throw(
@@ -1293,7 +1371,12 @@ function rebuild!(db::VectorDB)
     )
 end
 
-"""Compact all immutable and active segments into a freshly indexed base generation."""
+"""
+    compact!(db)
+
+Compact all immutable and active segments into a freshly indexed base
+generation using the most recent build configuration.
+"""
 function compact!(db::VectorDB)
     return rebuild!(db)
 end
@@ -1681,6 +1764,21 @@ function search_database_locked(
     return merge_database_search_results(merged, delta_results, k)
 end
 
+"""
+    search(db, query; k=10, strategy=:auto, filter=nothing, kwargs...)
+    search(db, queries; k=10, strategy=:auto, filter=nothing, kwargs...)
+
+Return ranked [`SearchResult`](@ref) values for one query vector or a
+column-major query matrix. `strategy=:auto` selects among exact, IVF and
+filter-aware execution. A `NamedTuple` is an equality filter; richer predicates
+use [`FilterExpr`](@ref).
+
+Example:
+
+```julia
+hits = search(db, query_embedding; k=5, filter=Eq(:language, "julia"))
+```
+"""
 function search(
     db::VectorDB,
     query::AbstractVector{<:Real};
@@ -1916,6 +2014,12 @@ function search(
     end
 end
 
+"""
+    save!(db; retain_snapshots=2)
+
+Create and atomically publish a durable snapshot, checkpoint the WAL, and keep
+the newest `retain_snapshots` valid generations.
+"""
 function save!(db::VectorDB; retain_snapshots::Int = 2)
     return with_database_write(db.database_lock) do
         activate_database_writer_lock!(db)
@@ -2286,6 +2390,18 @@ function load_db_without_writer_lock(
     end
 end
 
+"""
+    load_db(path; mmap_vectors=:auto, rebuild=false, recover=false, kwargs...)
+
+Open an existing database and acquire its single-writer lock. `mmap_vectors`
+accepts `true`, `false`, or `:auto`. Close the returned database when finished.
+
+Example:
+
+```julia
+db = load_db("documents.sen"; mmap_vectors=true)
+```
+"""
 function load_db(
     path::AbstractString;
     iterations::Int = 20,
@@ -2325,6 +2441,13 @@ function load_db(
     end
 end
 
+"""
+    recover_db(path; kwargs...)
+
+Open a durable database with snapshot recovery enabled. If the current
+generation is damaged or incomplete, Sen selects the newest valid generation
+and replays committed WAL records.
+"""
 function recover_db(
     path::AbstractString;
     iterations::Int = 20,

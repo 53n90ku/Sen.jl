@@ -1,2 +1,0 @@
-engine	method	selected_ef	train_recall	recall	p50_ms	p95_ms	qps	vector_count	dimension	heldout_queries	target_recall	build_seconds	storage_megabytes	server_version	client_version
-qdrant	acorn_filtered_hnsw	256	0.9041666666666667	0.90625	9.7585	16.990792	93.92490210970593	100000	4096	48	0.95	0.0	1890.9092998504639	1.18.1	1.18.0

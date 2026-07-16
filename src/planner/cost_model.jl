@@ -1,3 +1,9 @@
+"""
+    PlannerConfig(; kwargs...)
+
+Tune automatic query planning, including recall targets, candidate expansion,
+probe limits and the cost model used by [`plan_query`](@ref).
+"""
 struct PlannerConfig
     target_recall::Float64
     candidate_multiplier::Float64

@@ -1,11 +1,12 @@
-*.md
-!README.md
+/plan.md
 /roadmap.md
-docs/
-/benchmark/SenBench/test/
 Manifest.toml
 experiments/*.bin
-results/*/raw_results.tsv
 /data/
+/results/*
+!/results/release/
+!/results/release/**
 /benchmark/external/.venv/
 /benchmark/external/qdrant_storage/
+__pycache__/
+*.pyc
